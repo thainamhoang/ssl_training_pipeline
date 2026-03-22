@@ -1,0 +1,35 @@
+global_vars:
+  lr_deg: 5.625
+  hr_deg: 1.40625
+  var: 2m_temperature
+
+data:
+  type: era5
+  lr_dir: /scratch/izar/hoang/SSL/data/${global_vars.lr_deg}deg/${global_vars.var}
+  hr_dir: /scratch/izar/hoang/SSL/data/${global_vars.hr_deg}deg/${global_vars.var}
+  stride: 6
+  preload: false
+  batch_size: 128
+  num_workers: 6
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+model:
+  model_id: dinov3-sat
+  upscale: 4
+  hidden_dim: 256
+
+# dinov3-sat config  
+training:
+  max_epochs: 50
+  lr: 4e-4
+  weight_decay: 1e-4
+  patience: 5
+  warmup_epochs: 0
+  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints
+
+wandb:
+  entity: thainamhoang
+  project: SSL Climate
+  name: ${model.model_id}_${model.upscale}x_${global_vars.lr_deg}deg_${global_vars.hr_deg}deg
