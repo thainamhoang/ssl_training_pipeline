@@ -1,7 +1,6 @@
 import os
 import torch
 from torch.utils.data import DataLoader
-
 from downscaling_dataset import DownscalingDataset
 from frozen_ssl import FrozenSSLDownscaler
 from trainer_utils import (
@@ -11,17 +10,20 @@ from trainer_utils import (
     save_checkpoint,
     load_checkpoint,
 )
-
 from dotenv import load_dotenv
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
 import wandb
 
 # ── Token config ─────────────────────────────────────────────────────────
-
 load_dotenv()
-os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
-wandb.login(os.getenv("WANDB_API_KEY"))
+hf_token = os.getenv("HF_TOKEN")
+wandb_api_key = os.getenv("WANDB_API_KEY")
+if not hf_token or not wandb_api_key:
+    raise ValueError("HF_TOKEN and WANDB_API_KEY must be set")
+else:
+    os.environ["HF_TOKEN"] = hf_token
+    wandb.login(wandb_api_key)
 
 # ── Parser and config ─────────────────────────────────────────────────────────
 parser = ArgumentParser()
@@ -31,7 +33,6 @@ parser.add_argument(
 )
 args = parser.parse_args()
 cfg = OmegaConf.load(args.config)
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 MODEL_REGISTRY = {
@@ -50,7 +51,6 @@ patch_size = MODEL_REGISTRY[model_key]["patch_size"]
 
 CKPT_DIR = os.path.join(cfg.training.get("ckpt_dir", "./checkpoints"), model_key)
 os.makedirs(CKPT_DIR, exist_ok=True)
-
 CKPT_LATEST = os.path.join(CKPT_DIR, "latest.pt")
 CKPT_BEST = os.path.join(CKPT_DIR, "best.pt")
 
@@ -79,7 +79,6 @@ def main():
         stride=cfg.data.stride,
         preload=cfg.data.preload,
     )
-
     lr_shape = train_ds.lr_shape
     hr_shape = train_ds.hr_shape
 
@@ -138,7 +137,7 @@ def main():
         )
         # Scheduler state is restored from checkpoint — no fast-forward needed
     else:
-        print("Starting fresh training run.")
+        print("Starting fresh training run. ")
 
     # ── WandB — resume if run_id exists ────────────────────────────────────
     run = wandb.init(
@@ -150,7 +149,7 @@ def main():
         config=OmegaConf.to_container(cfg, resolve=True),
     )
     wandb_run_id = run.id  # store for next checkpoint
-    print(f"WandB run: {run.url}")
+    print(f"WandB run: {run.url} ")
     run.watch(model.decoder, log="all", log_freq=50)
 
     # ── Training loop ──────────────────────────────────────────────────────
@@ -170,12 +169,12 @@ def main():
         run.log(log_dict, step=epoch, commit=True)
 
         print(
-            f"Epoch {epoch:3d}/{cfg.training.max_epochs} | "
-            f"LR: {current_lr:.2e} | "
-            f"Loss: {train_metrics['train/loss']:.4f} | "
-            f"Val RMSE: {val_metrics['val/rmse']:.4f} | "
-            f"Pearson: {val_metrics['val/pearson']:.4f} | "
-            f"vs Bilinear: {val_metrics['val/rmse_vs_bilinear']:+.4f}"
+            f"Epoch {epoch:3d}/{cfg.training.max_epochs} |  "
+            f"LR: {current_lr:.2e} |  "
+            f"Loss: {train_metrics['train/loss']:.4f} |  "
+            f"Val RMSE: {val_metrics['val/rmse']:.4f} |  "
+            f"Pearson: {val_metrics['val/pearson']:.4f} |  "
+            f"vs Bilinear: {val_metrics['val/rmse_vs_bilinear']:+.4f} "
         )
 
         # ── Save latest checkpoint every epoch ────────────────────────────
@@ -183,6 +182,8 @@ def main():
             CKPT_LATEST,
             epoch,
             model,
+            model_key,
+            cfg,
             optimizer,
             scheduler,
             scaler,
@@ -199,6 +200,8 @@ def main():
                 CKPT_BEST,
                 epoch,
                 model,
+                model_key,
+                cfg,
                 optimizer,
                 scheduler,
                 scaler,
@@ -207,11 +210,11 @@ def main():
                 wandb_run_id,
             )
             run.log({"best/val_rmse": float(best_val_rmse)}, step=epoch, commit=False)
-            print(f"  → New best: {best_val_rmse:.4f} (saved to {CKPT_BEST})")
+            print(f"  → New best: {best_val_rmse:.4f} (saved to {CKPT_BEST}) ")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= cfg.training.patience:
-                print(f"  → Early stopping at epoch {epoch}")
+                print(f"  → Early stopping at epoch {epoch} ")
                 break
 
     # ── Test ───────────────────────────────────────────────────────────────
@@ -236,10 +239,10 @@ def main():
     run.summary["test/bilinear_rmse"] = float(test_metrics["test/bilinear_rmse"])
     run.summary["test/improvement_pct"] = float(improvement)
 
-    print(f"\n── Test Results ({model_key}) ──────────────────────")
+    print(f"\n── Test Results ({model_key}) ────────────────────── ")
     for k, v in test_metrics.items():
-        print(f"  {k:<30}: {v:.4f}")
-    print(f"  {'test/improvement_pct':<30}: {improvement:.1f}%")
+        print(f"  {k: <30}: {v:.4f} ")
+    print(f"  {'test/improvement_pct': <30}: {improvement:.1f}% ")
 
     run.finish()
 

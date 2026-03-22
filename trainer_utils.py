@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm import tqdm
-
 from omegaconf import OmegaConf
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -102,9 +101,9 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
     wandb_run_id = ckpt.get("wandb_run_id", None)
 
     print(
-        f"Resumed from epoch {ckpt['epoch']} | "
-        f"best_val_rmse={best_val_rmse:.4f} | "
-        f"epochs_no_improve={epochs_no_improve}"
+        f"Resumed from epoch {ckpt['epoch']} |  "
+        f"best_val_rmse={best_val_rmse:.4f} |  "
+        f"epochs_no_improve={epochs_no_improve} "
     )
     return start_epoch, best_val_rmse, epochs_no_improve, wandb_run_id
 
@@ -114,7 +113,6 @@ def train_one_epoch(model, loader, optimizer, scaler, epoch):
     model.decoder.train()
     model.feat_norm.train()
     model.encoder.eval()
-
     total_loss = 0.0
     total_rmse = 0.0
     n_batches = 0
@@ -150,7 +148,6 @@ def train_one_epoch(model, loader, optimizer, scaler, epoch):
 @torch.no_grad()
 def evaluate(model, loader, hr_shape, split="val"):
     model.eval()
-
     total_loss = 0.0
     total_rmse = 0.0
     total_pearson = 0.0
@@ -160,7 +157,7 @@ def evaluate(model, loader, hr_shape, split="val"):
     n_batches = 0
 
     for lr_imagenet, lr_norm, hr_norm in tqdm(
-        loader, desc=f"Eval  {split}", leave=False
+        loader, desc=f"Eval {split}", leave=False
     ):
         lr_imagenet = lr_imagenet.to(DEVICE)
         lr_norm = lr_norm.to(DEVICE)
