@@ -2,6 +2,7 @@ global_vars:
   lr_deg: 5.625
   hr_deg: 1.40625
   var: 2m_temperature
+  seed: 3407
 
 data:
   type: era5
@@ -27,7 +28,7 @@ training:
   weight_decay: 1e-4
   patience: 5
   warmup_epochs: 0
-  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints
+  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}
 
 wandb:
   entity: thainamhoang

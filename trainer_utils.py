@@ -1,3 +1,5 @@
+import random
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
@@ -207,3 +209,12 @@ def evaluate(model, loader, hr_shape, split="val"):
         f"{split}/bilinear_rmse": avg_bil_rmse,
         f"{split}/rmse_vs_bilinear": avg_rmse - avg_bil_rmse,
     }
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False

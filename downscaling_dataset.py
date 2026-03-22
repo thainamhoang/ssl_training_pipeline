@@ -148,9 +148,8 @@ class DownscalingDataset(Dataset):
         hr_norm = (hr_raw - self.hr_mean) / (self.hr_std + 1e-8)
 
         # ── SSL encoder input: raw Kelvin → [0,1] → ImageNet ──────────────
-        vmin = lr_raw.min()
-        vmax = lr_raw.max()
-        lr_01 = (lr_raw - vmin) / (vmax - vmin + 1e-8)
+        lr_z = (lr_raw - self.lr_mean) / (self.lr_std + 1e-8)  # z-score (deterministic)
+        lr_01 = torch.clamp(lr_z / 6.0 + 0.5, 0.0, 1.0)  # [-3σ,+3σ] → [0,1]
         lr_imagenet = lr_01.repeat(3, 1, 1)
         lr_imagenet = (lr_imagenet - self.IMAGENET_MEAN) / self.IMAGENET_STD
 

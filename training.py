@@ -9,6 +9,7 @@ from trainer_utils import (
     evaluate,
     save_checkpoint,
     load_checkpoint,
+    set_seed,
 )
 from dotenv import load_dotenv
 from argparse import ArgumentParser
@@ -33,6 +34,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 cfg = OmegaConf.load(args.config)
+set_seed(cfg.global_vars.seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 MODEL_REGISTRY = {
@@ -51,8 +53,8 @@ patch_size = MODEL_REGISTRY[model_key]["patch_size"]
 
 CKPT_DIR = os.path.join(cfg.training.get("ckpt_dir", "./checkpoints"), model_key)
 os.makedirs(CKPT_DIR, exist_ok=True)
-CKPT_LATEST = os.path.join(CKPT_DIR, "latest.pt")
-CKPT_BEST = os.path.join(CKPT_DIR, "best.pt")
+CKPT_LATEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_latest.pt")
+CKPT_BEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_best.pt")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
