@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ssl_climate_4x_dinov3-sat
+# SBATCH --job-name=ssl_climate_4x_dinov3-sat
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --output=/home/hoang/SSL/logs/ssl_climate_4x_dinov3-sat.%j.out
-#SBATCH --error=/home/hoang/SSL/logs/ssl_climate_4x_dinov3-sat.%j.err
+#SBATCH --output=/home/hoang/SSL/ssl_training_pipeline/logs/lora8_ssl_climate_4x_dinov3-sat.%j.out
+#SBATCH --error=/home/hoang/SSL/ssl_training_pipeline/logs/lora8_ssl_climate_4x_dinov3-sat.%j.err
 
 CONFIG_FILE=$1
 
