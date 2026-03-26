@@ -111,49 +111,56 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
 
 
 # ── Train one epoch ───────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, optimizer, scaler, epoch):
+def train_one_epoch(model, loader, optimizer, scaler, epoch, grad_accum_steps=1):
     model.decoder.train()
     model.feat_norm.train()
 
-    # frozen: encoder stays eval (no grads, no state update needed)
-    # lora:   encoder stays train (LoRA params are active)
     if model.mode == "frozen":
         model.encoder.eval()
     else:
         model.encoder.train()
 
     total_loss = 0.0
-    total_rmse = 0.0
-    n_batches = 0
+    n_samples = 0
+    sum_sq_err = 0.0  # for true RMSE
 
-    for lr_imagenet, _, hr_norm in tqdm(loader, desc=f"Train {epoch}", leave=False):
+    optimizer.zero_grad()
+
+    for i, (lr_imagenet, _, hr_norm) in enumerate(
+        tqdm(loader, desc=f"Train {epoch}", leave=False)
+    ):
         lr_imagenet = lr_imagenet.to(DEVICE)
         hr_norm = hr_norm.to(DEVICE)
 
-        optimizer.zero_grad()
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             pred = model(lr_imagenet)
-            loss = F.mse_loss(pred, hr_norm)
+            # Divide loss by accum steps so gradients average correctly
+            loss = F.mse_loss(pred, hr_norm) / grad_accum_steps
 
         scaler.scale(loss).backward()
 
-        # Must unscale before clipping — otherwise clipping scaled gradients
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(
-            [p for p in model.parameters() if p.requires_grad],
-            max_norm=1.0,
-        )
+        # Accumulate true (unscaled) metrics — multiply back to get real MSE
+        real_mse = loss.item() * grad_accum_steps
+        sum_sq_err += real_mse * hr_norm.numel()
+        n_samples += hr_norm.numel()
+        total_loss += real_mse
 
-        scaler.step(optimizer)
-        scaler.update()
+        # Optimizer step only on accumulation boundary or last batch
+        is_last_batch = i + 1 == len(loader)
+        if (i + 1) % grad_accum_steps == 0 or is_last_batch:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad],
+                max_norm=1.0,
+            )
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
-        total_loss += loss.item()
-        total_rmse += loss.item() ** 0.5
-        n_batches += 1
-
+    n_steps = len(loader)
     return {
-        "train/loss": total_loss / n_batches,
-        "train/rmse": total_rmse / n_batches,
+        "train/loss": total_loss / n_steps,
+        "train/rmse": (sum_sq_err / n_samples) ** 0.5,  # true RMSE
     }
 
 

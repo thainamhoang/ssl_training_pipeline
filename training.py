@@ -179,7 +179,14 @@ def main():
 
     # ── Training loop ──────────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg.training.max_epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, scaler, epoch)
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            scaler,
+            epoch,
+            grad_accum_steps=cfg.training.grad_accum_steps,
+        )
         val_metrics = evaluate(model, val_loader, hr_shape, split="val")
         scheduler.step()
 

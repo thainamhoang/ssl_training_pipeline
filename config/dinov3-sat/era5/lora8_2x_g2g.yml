@@ -10,7 +10,7 @@ data:
   hr_dir: /scratch/izar/hoang/SSL/data/${global_vars.hr_deg}deg/${global_vars.var}
   stride: 6
   preload: false
-  batch_size: 128
+  batch_size: 32
   num_workers: 6
   pin_memory: true
   persistent_workers: true
@@ -33,6 +33,7 @@ training:
   weight_decay: 1e-2
   patience: 5
   warmup_epochs: 3
+  grad_accum_steps: 4
   ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}
 
 wandb:

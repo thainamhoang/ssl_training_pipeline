@@ -162,6 +162,7 @@ class SSLDownscaler(nn.Module):
             )
 
             self.encoder = get_peft_model(encoder, lora_cfg)
+            self.encoder.gradient_checkpointing_enable()
             # get_peft_model sets encoder to train() — keep it that way
             # so BatchNorm/Dropout behave correctly if present
             self.encoder.train()
