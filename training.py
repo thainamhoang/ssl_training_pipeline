@@ -30,6 +30,8 @@ else:
 # ── Parser and config ─────────────────────────────────────────────────────────
 parser = ArgumentParser()
 parser.add_argument("--config", type=str, required=True, help="Path to config file")
+parser.add_argument("--hr_dir", type=str, required=False, help="Path to HR directory")
+parser.add_argument("--lr_dir", type=str, required=False, help="Path to LR directory")
 parser.add_argument(
     "--resume", type=str, default=None, help="Path to checkpoint dir to resume from"
 )
@@ -57,30 +59,23 @@ os.makedirs(cfg.training.get("ckpt_dir", "./checkpoints"), exist_ok=True)
 CKPT_LATEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_latest.pt")
 CKPT_BEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_best.pt")
 
+LR_DIR = args.lr_dir if args.lr_dir else cfg.data.lr_dir
+HR_DIR = args.hr_dir if args.hr_dir else cfg.data.hr_dir
+print(f"Using LR directory: {LR_DIR}")
+print(f"Using HR directory: {HR_DIR}")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     # ── Datasets ──────────────────────────────────────────────────────────
     train_ds = DownscalingDataset(
-        cfg.data.lr_dir,
-        cfg.data.hr_dir,
-        "train",
-        stride=cfg.data.stride,
-        preload=cfg.data.preload,
+        LR_DIR, HR_DIR, "train", stride=cfg.data.stride, preload=cfg.data.preload
     )
     val_ds = DownscalingDataset(
-        cfg.data.lr_dir,
-        cfg.data.hr_dir,
-        "val",
-        stride=cfg.data.stride,
-        preload=cfg.data.preload,
+        LR_DIR, HR_DIR, "val", stride=cfg.data.stride, preload=cfg.data.preload
     )
     test_ds = DownscalingDataset(
-        cfg.data.lr_dir,
-        cfg.data.hr_dir,
-        "test",
-        stride=cfg.data.stride,
-        preload=cfg.data.preload,
+        LR_DIR, HR_DIR, "test", stride=cfg.data.stride, preload=cfg.data.preload
     )
     lr_shape = train_ds.lr_shape
     hr_shape = train_ds.hr_shape

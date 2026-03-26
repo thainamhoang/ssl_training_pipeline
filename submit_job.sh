@@ -2,9 +2,10 @@
 # SBATCH --job-name=ssl_climate_4x_dinov3-sat
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
+#SBATCH --tmp=120G
 #SBATCH --output=/home/hoang/SSL/ssl_training_pipeline/logs/lora8_ssl_climate_4x_dinov3-sat.%j.out
 #SBATCH --error=/home/hoang/SSL/ssl_training_pipeline/logs/lora8_ssl_climate_4x_dinov3-sat.%j.err
 
@@ -44,5 +45,11 @@ NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr "," "\n" | wc -l)
 
 echo "Using $NUM_GPUS GPU(s): $CUDA_VISIBLE_DEVICES"
 
+# Copy only HR to local SSD — LR is tiny enough to read from scratch
+echo "Copying HR shards to local SSD..."
+mkdir -p $TMPDIR/hr/train $TMPDIR/hr/val $TMPDIR/hr/test
+cp -r /scratch/izar/hoang/SSL/data/1.40625deg/2m_temperature/ $TMPDIR/hr/train/
+echo "Done: $(du -sh $TMPDIR/hr/)"
+
 # Launch training
-torchrun --nproc_per_node=$NUM_GPUS training.py --config $CONFIG_FILE
+torchrun --nproc_per_node=$NUM_GPUS training.py --config $CONFIG_FILE --hr_dir=$TMPDIR/hr

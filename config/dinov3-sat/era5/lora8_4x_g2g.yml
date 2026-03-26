@@ -9,12 +9,12 @@ data:
   lr_dir: /scratch/izar/hoang/SSL/data/${global_vars.lr_deg}deg/${global_vars.var}
   hr_dir: /scratch/izar/hoang/SSL/data/${global_vars.hr_deg}deg/${global_vars.var}
   stride: 6
-  preload: true
+  preload: false
   batch_size: 96
-  num_workers: 0
-  pin_memory: false
-  persistent_workers: false
-  prefetch_factor: null
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
 
 model:
   mode: lora
