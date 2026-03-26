@@ -11,7 +11,7 @@ data:
   stride: 6
   preload: false
   batch_size: 32
-  num_workers: 6
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
@@ -19,7 +19,7 @@ data:
 model:
   mode: lora
   model_id: dinov3-sat
-  upscale: 2
+  upscale: 4
   hidden_dim: 256
   lora_r: 8
   lora_alpha: 16
