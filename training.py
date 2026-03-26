@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from downscaling_dataset import DownscalingDataset
 from frozen_ssl import FrozenSSLDownscaler
+from ssl_downscaler import SSLDownscaler
 from trainer_utils import (
     make_scheduler,
     train_one_epoch,
@@ -51,8 +52,8 @@ assert model_key in MODEL_REGISTRY, f"Unknown model_id '{model_key}'"
 model_id = MODEL_REGISTRY[model_key]["model_id"]
 patch_size = MODEL_REGISTRY[model_key]["patch_size"]
 
-CKPT_DIR = os.path.join(cfg.training.get("ckpt_dir", "./checkpoints"), model_key)
-os.makedirs(CKPT_DIR, exist_ok=True)
+CKPT_DIR = cfg.training.get("ckpt_dir", "./checkpoints")
+os.makedirs(cfg.training.get("ckpt_dir", "./checkpoints"), exist_ok=True)
 CKPT_LATEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_latest.pt")
 CKPT_BEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_best.pt")
 
@@ -105,19 +106,41 @@ def main():
     test_loader = make_loader(test_ds, shuffle=False)
 
     # ── Model ──────────────────────────────────────────────────────────────
-    model = FrozenSSLDownscaler(
-        model_id=model_id,
-        patch_size=patch_size,
-        lr_shape=lr_shape,
-        hr_shape=hr_shape,
-        upscale=cfg.model.upscale,
-        hidden_dim=cfg.model.hidden_dim,
-    ).to(DEVICE)
+    mode = cfg.model.mode
+    if mode == "frozen":
+        model = FrozenSSLDownscaler(
+            model_id=model_id,
+            patch_size=patch_size,
+            lr_shape=lr_shape,
+            hr_shape=hr_shape,
+            upscale=cfg.model.upscale,
+            hidden_dim=cfg.model.hidden_dim,
+        ).to(DEVICE)
 
-    optimizer = model.make_optimizer(
-        lr=cfg.training.lr,
-        weight_decay=cfg.training.weight_decay,
-    )
+        optimizer = model.make_optimizer(
+            lr=cfg.training.lr,
+            weight_decay=cfg.training.weight_decay,
+        )
+    elif mode == "lora":
+        model = SSLDownscaler(
+            model_id=model_id,
+            patch_size=patch_size,
+            lr_shape=lr_shape,
+            hr_shape=hr_shape,
+            upscale=cfg.model.upscale,
+            hidden_dim=cfg.model.hidden_dim,
+            mode=mode,
+            lora_r=cfg.model.lora_r,
+            lora_alpha=cfg.model.lora_alpha,
+            lora_dropout=cfg.model.lora_dropout,
+        ).to(DEVICE)
+
+        optimizer = model.make_optimizer(
+            lr=cfg.training.lr,
+            decoder_lr=cfg.training.decoder_lr,  # add this
+            weight_decay=cfg.training.weight_decay,
+        )
+
     scheduler = make_scheduler(
         optimizer,
         warmup_epochs=cfg.training.warmup_epochs,

@@ -114,7 +114,14 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
 def train_one_epoch(model, loader, optimizer, scaler, epoch):
     model.decoder.train()
     model.feat_norm.train()
-    model.encoder.eval()
+
+    # frozen: encoder stays eval (no grads, no state update needed)
+    # lora:   encoder stays train (LoRA params are active)
+    if model.mode == "frozen":
+        model.encoder.eval()
+    else:
+        model.encoder.train()
+
     total_loss = 0.0
     total_rmse = 0.0
     n_batches = 0
@@ -129,10 +136,14 @@ def train_one_epoch(model, loader, optimizer, scaler, epoch):
             loss = F.mse_loss(pred, hr_norm)
 
         scaler.scale(loss).backward()
+
+        # Must unscale before clipping — otherwise clipping scaled gradients
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(
-            list(model.decoder.parameters()) + list(model.feat_norm.parameters()),
+            [p for p in model.parameters() if p.requires_grad],
             max_norm=1.0,
         )
+
         scaler.step(optimizer)
         scaler.update()
 
@@ -150,13 +161,13 @@ def train_one_epoch(model, loader, optimizer, scaler, epoch):
 @torch.no_grad()
 def evaluate(model, loader, hr_shape, split="val"):
     model.eval()
-    total_loss = 0.0
-    total_rmse = 0.0
+
+    sum_sq_err = 0.0  # accumulate MSE numerator for true RMSE
+    sum_bil_sq = 0.0
     total_pearson = 0.0
     total_bias = 0.0
-    bilinear_loss = 0.0
-    bilinear_rmse = 0.0
     n_batches = 0
+    n_pixels = 0  # total pixels for true MSE denominator
 
     for lr_imagenet, lr_norm, hr_norm in tqdm(
         loader, desc=f"Eval {split}", leave=False
@@ -169,45 +180,51 @@ def evaluate(model, loader, hr_shape, split="val"):
             pred = model(lr_imagenet).float()
 
         hr_norm = hr_norm.float()
+        B = hr_norm.shape[0]
 
-        mse = F.mse_loss(pred, hr_norm).item()
-        rmse = mse**0.5
-        bias = (pred - hr_norm).mean().item()
+        # True MSE accumulation — sum of squared errors, divide once at end
+        sq_err = ((pred - hr_norm) ** 2).sum().item()
+        sum_sq_err += sq_err
+        n_pixels += hr_norm.numel()
 
-        pred_f = pred.flatten()
-        tgt_f = hr_norm.flatten()
-        pred_c = pred_f - pred_f.mean()
-        tgt_c = tgt_f - tgt_f.mean()
-        pearson = (
-            (pred_c * tgt_c).sum()
-            / (torch.sqrt((pred_c**2).sum()) * torch.sqrt((tgt_c**2).sum()) + 1e-8)
-        ).item()
+        # Bias — mean over batch
+        total_bias += (pred - hr_norm).mean().item()
 
+        # Pearson — per sample, then average
+        batch_pearson = 0.0
+        for i in range(B):
+            p = pred[i].flatten()
+            t = hr_norm[i].flatten()
+            pc = p - p.mean()
+            tc = t - t.mean()
+            r = (pc * tc).sum() / (
+                torch.sqrt((pc**2).sum()) * torch.sqrt((tc**2).sum()) + 1e-8
+            )
+            batch_pearson += r.item()
+        total_pearson += batch_pearson / B
+
+        # Bilinear baseline
         bil = F.interpolate(
             lr_norm, size=hr_shape, mode="bilinear", align_corners=False
         )
-        bil_mse = F.mse_loss(bil, hr_norm).item()
-        bil_rmse = bil_mse**0.5
+        bil_sq = ((bil - hr_norm) ** 2).sum().item()
+        sum_bil_sq += bil_sq
 
-        total_loss += mse
-        total_rmse += rmse
-        total_pearson += pearson
-        total_bias += bias
-        bilinear_loss += bil_mse
-        bilinear_rmse += bil_rmse
         n_batches += 1
 
-    avg_rmse = total_rmse / n_batches
-    avg_bil_rmse = bilinear_rmse / n_batches
+    # True RMSE from accumulated squared errors
+    true_mse = sum_sq_err / n_pixels
+    true_rmse = true_mse**0.5
+    bil_mse = sum_bil_sq / n_pixels
+    bil_rmse = bil_mse**0.5
 
     return {
-        f"{split}/loss": total_loss / n_batches,
-        f"{split}/rmse": avg_rmse,
+        f"{split}/loss": true_mse,
+        f"{split}/rmse": true_rmse,
         f"{split}/pearson": total_pearson / n_batches,
         f"{split}/bias": total_bias / n_batches,
-        f"{split}/bilinear_loss": bilinear_loss / n_batches,
-        f"{split}/bilinear_rmse": avg_bil_rmse,
-        f"{split}/rmse_vs_bilinear": avg_rmse - avg_bil_rmse,
+        f"{split}/bilinear_rmse": bil_rmse,
+        f"{split}/rmse_vs_bilinear": true_rmse - bil_rmse,
     }
 
 

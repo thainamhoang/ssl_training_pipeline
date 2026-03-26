@@ -17,20 +17,25 @@ data:
   prefetch_factor: 2
 
 model:
-  model_id: dinov2-l
+  mode: lora
+  model_id: dinov3-sat
   upscale: 2
   hidden_dim: 256
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
 
 # dinov3-sat config  
 training:
   max_epochs: 50
-  lr: 1e-4
-  weight_decay: 1e-4
+  lr: 5e-5
+  decoder_lr: 4e-4
+  weight_decay: 1e-2
   patience: 5
-  warmup_epochs: 0
-  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}
+  warmup_epochs: 3
+  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}
 
 wandb:
   entity: thainamhoang
   project: SSL Climate
-  name: ${model.model_id}_${model.upscale}x_${global_vars.lr_deg}deg_${global_vars.hr_deg}deg
+  name: ${model.mode}${model.lora_r}_${model.model_id}_${model.upscale}x_${global_vars.lr_deg}deg_${global_vars.hr_deg}deg

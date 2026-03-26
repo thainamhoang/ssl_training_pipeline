@@ -1,6 +1,6 @@
 global_vars:
   lr_deg: 5.625
-  hr_deg: 1.40625
+  hr_deg: 2.8125
   var: 2m_temperature
   seed: 3407
 
@@ -17,6 +17,7 @@ data:
   prefetch_factor: 2
 
 model:
+  mode: frozen
   model_id: dinov2-l
   upscale: 2
   hidden_dim: 256
@@ -28,9 +29,9 @@ training:
   weight_decay: 1e-4
   patience: 5
   warmup_epochs: 0
-  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}
+  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}
 
 wandb:
   entity: thainamhoang
   project: SSL Climate
-  name: ${model.model_id}_${model.upscale}x_${global_vars.lr_deg}deg_${global_vars.hr_deg}deg
+  name: ${model.mode}_${model.model_id}_${model.upscale}x_${global_vars.lr_deg}deg_${global_vars.hr_deg}deg
