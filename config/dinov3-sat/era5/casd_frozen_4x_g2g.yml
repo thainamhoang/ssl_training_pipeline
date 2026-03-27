@@ -29,11 +29,13 @@ model:
 
 # dinov3-sat config  
 training:
-  max_epochs: 50
-  lr: 4e-4
-  weight_decay: 1e-4
-  patience: 5
-  warmup_epochs: 0
+  max_epochs: 80
+  lr: 5e-5                # LoRA LR (ignored for casd_frozen)
+  decoder_lr: 2e-4        # decoder LR (used for all CASD modes)
+  weight_decay: 1e-2
+  patience: 10
+  warmup_epochs: 5
+  grad_accum_steps: 1
   ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}
 
 wandb:
