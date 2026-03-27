@@ -11,7 +11,7 @@ data:
   stride: 6
   preload: false
   batch_size: 128
-  num_workers: 6
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2

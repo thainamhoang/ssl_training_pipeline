@@ -9,7 +9,7 @@ data:
   lr_dir: /scratch/izar/hoang/SSL/data/${global_vars.lr_deg}deg/${global_vars.var}
   hr_dir: /scratch/izar/hoang/SSL/data/${global_vars.hr_deg}deg/${global_vars.var}
   stride: 6
-  batch_size: 96
+  batch_size: 128
   num_workers: 4
   pin_memory: true
   persistent_workers: true
@@ -33,7 +33,7 @@ training:
   patience: 5
   warmup_epochs: 5
   grad_accum_steps: 1
-  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}
+  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}${model.lora_r}
 
 wandb:
   entity: thainamhoang
