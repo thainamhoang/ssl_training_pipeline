@@ -63,11 +63,16 @@ def save_checkpoint(
     epochs_no_improve,
     wandb_run_id,
 ):
+    """
+    Save full training state.
+
+    Uses model.state_dict() rather than named submodule state dicts —
+    works for all model types: FrozenSSLDownscaler, SSLDownscaler, CASD.
+    """
     torch.save(
         {
             "epoch": epoch,
-            "decoder": model.decoder.state_dict(),
-            "feat_norm": model.feat_norm.state_dict(),
+            "model_state": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
@@ -84,17 +89,32 @@ def save_checkpoint(
 def load_checkpoint(path, model, optimizer, scheduler, scaler):
     """
     Load checkpoint and return training state.
+
+    Supports two checkpoint formats:
+        New (CASD-compatible): "model_state" key → model.load_state_dict()
+        Old (Pilot 2/3):       "decoder" + "feat_norm" keys → submodule load
+
+    Old format is detected automatically — no manual flag needed.
     Returns (start_epoch, best_val_rmse, epochs_no_improve, wandb_run_id).
     """
     print(f"Loading checkpoint: {path}")
     ckpt = torch.load(path, map_location=DEVICE)
 
-    model.decoder.load_state_dict(ckpt["decoder"])
-    model.feat_norm.load_state_dict(ckpt["feat_norm"])
+    if "model_state" in ckpt:
+        # New format — works for FrozenSSLDownscaler, SSLDownscaler, CASD
+        model.load_state_dict(ckpt["model_state"])
+    elif "decoder" in ckpt and "feat_norm" in ckpt:
+        # Old format — Pilot 2/3 checkpoints (decoder + feat_norm only)
+        print("  Detected old checkpoint format (decoder + feat_norm). Loading...")
+        model.decoder.load_state_dict(ckpt["decoder"])
+        model.feat_norm.load_state_dict(ckpt["feat_norm"])
+    else:
+        raise KeyError(
+            f"Unrecognised checkpoint format. Keys found: {list(ckpt.keys())}"
+        )
+
     optimizer.load_state_dict(ckpt["optimizer"])
     scaler.load_state_dict(ckpt["scaler"])
-
-    # Restore scheduler state directly (preserves exact LR curve position)
     scheduler.load_state_dict(ckpt["scheduler"])
 
     start_epoch = ckpt["epoch"] + 1
@@ -105,24 +125,56 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
     print(
         f"Resumed from epoch {ckpt['epoch']} |  "
         f"best_val_rmse={best_val_rmse:.4f} |  "
-        f"epochs_no_improve={epochs_no_improve} "
+        f"epochs_no_improve={epochs_no_improve}"
     )
     return start_epoch, best_val_rmse, epochs_no_improve, wandb_run_id
 
 
-# ── Train one epoch ───────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, optimizer, scaler, epoch, grad_accum_steps=1):
-    model.decoder.train()
-    model.feat_norm.train()
+# ── Train/eval mode helpers ────────────────────────────────────────────────────
+def _set_train_mode(model):
+    """
+    Set correct train/eval modes depending on model type.
 
-    if model.mode == "frozen":
+    FrozenSSLDownscaler / SSLDownscaler (frozen):
+        encoder.eval(), decoder.train(), feat_norm.train()
+
+    SSLDownscaler (lora):
+        encoder.train(), decoder.train(), feat_norm.train()
+
+    CASD (frozen):
+        encoder.eval(), all decoder submodules train()
+
+    CASD (lora):
+        encoder.train(), all decoder submodules train()
+    """
+    mode = getattr(model, "mode", "frozen")
+
+    # Encoder
+    if mode == "frozen":
         model.encoder.eval()
     else:
         model.encoder.train()
 
+    # Decoder submodules — set everything that isn't the encoder to train()
+    # Works for both SSLDownscaler (decoder + feat_norm) and CASD
+    # (token_projs + coord_proj + ca_blocks + output_head)
+    for name, module in model.named_children():
+        if name != "encoder":
+            module.train()
+
+
+def _set_eval_mode(model):
+    """Set full eval mode — used during evaluation."""
+    model.eval()
+
+
+# ── Train one epoch ───────────────────────────────────────────────────────────
+def train_one_epoch(model, loader, optimizer, scaler, epoch, grad_accum_steps=1):
+    _set_train_mode(model)
+
     total_loss = 0.0
     n_samples = 0
-    sum_sq_err = 0.0  # for true RMSE
+    sum_sq_err = 0.0
 
     optimizer.zero_grad()
 
@@ -134,18 +186,15 @@ def train_one_epoch(model, loader, optimizer, scaler, epoch, grad_accum_steps=1)
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             pred = model(lr_imagenet)
-            # Divide loss by accum steps so gradients average correctly
             loss = F.mse_loss(pred, hr_norm) / grad_accum_steps
 
         scaler.scale(loss).backward()
 
-        # Accumulate true (unscaled) metrics — multiply back to get real MSE
         real_mse = loss.item() * grad_accum_steps
         sum_sq_err += real_mse * hr_norm.numel()
         n_samples += hr_norm.numel()
         total_loss += real_mse
 
-        # Optimizer step only on accumulation boundary or last batch
         is_last_batch = i + 1 == len(loader)
         if (i + 1) % grad_accum_steps == 0 or is_last_batch:
             scaler.unscale_(optimizer)
@@ -160,21 +209,21 @@ def train_one_epoch(model, loader, optimizer, scaler, epoch, grad_accum_steps=1)
     n_steps = len(loader)
     return {
         "train/loss": total_loss / n_steps,
-        "train/rmse": (sum_sq_err / n_samples) ** 0.5,  # true RMSE
+        "train/rmse": (sum_sq_err / n_samples) ** 0.5,
     }
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def evaluate(model, loader, hr_shape, split="val"):
-    model.eval()
+    _set_eval_mode(model)
 
-    sum_sq_err = 0.0  # accumulate MSE numerator for true RMSE
+    sum_sq_err = 0.0
     sum_bil_sq = 0.0
     total_pearson = 0.0
     total_bias = 0.0
     n_batches = 0
-    n_pixels = 0  # total pixels for true MSE denominator
+    n_pixels = 0
 
     for lr_imagenet, lr_norm, hr_norm in tqdm(
         loader, desc=f"Eval {split}", leave=False
@@ -189,15 +238,12 @@ def evaluate(model, loader, hr_shape, split="val"):
         hr_norm = hr_norm.float()
         B = hr_norm.shape[0]
 
-        # True MSE accumulation — sum of squared errors, divide once at end
         sq_err = ((pred - hr_norm) ** 2).sum().item()
         sum_sq_err += sq_err
         n_pixels += hr_norm.numel()
 
-        # Bias — mean over batch
         total_bias += (pred - hr_norm).mean().item()
 
-        # Pearson — per sample, then average
         batch_pearson = 0.0
         for i in range(B):
             p = pred[i].flatten()
@@ -210,7 +256,6 @@ def evaluate(model, loader, hr_shape, split="val"):
             batch_pearson += r.item()
         total_pearson += batch_pearson / B
 
-        # Bilinear baseline
         bil = F.interpolate(
             lr_norm, size=hr_shape, mode="bilinear", align_corners=False
         )
@@ -219,7 +264,6 @@ def evaluate(model, loader, hr_shape, split="val"):
 
         n_batches += 1
 
-    # True RMSE from accumulated squared errors
     true_mse = sum_sq_err / n_pixels
     true_rmse = true_mse**0.5
     bil_mse = sum_bil_sq / n_pixels
