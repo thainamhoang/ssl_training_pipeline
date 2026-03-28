@@ -8,3 +8,4 @@ matplotlib
 scipy
 peft
 transformers
+python_dotenv
