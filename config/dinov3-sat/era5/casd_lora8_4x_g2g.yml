@@ -6,8 +6,8 @@ global_vars:
 
 data:
   type: era5
-  lr_dir: /scratch/izar/hoang/SSL/data/${global_vars.lr_deg}deg/${global_vars.var}
-  hr_dir: /scratch/izar/hoang/SSL/data/${global_vars.hr_deg}deg/${global_vars.var}
+  lr_dir: /workspace/data/${global_vars.lr_deg}deg/${global_vars.var}
+  hr_dir: /workspace/data/${global_vars.hr_deg}deg/${global_vars.var}
   stride: 6
   preload: false
   batch_size: 32
@@ -38,7 +38,7 @@ training:
   patience: 10
   warmup_epochs: 5
   grad_accum_steps: 4
-  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}
+  ckpt_dir: /workspace/checkpoints/${data.type}/${model.model_id}/${model.mode}
 
 wandb:
   entity: thainamhoang
