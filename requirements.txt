@@ -1,0 +1,10 @@
+huggingface_hub
+wandb
+omegaconf
+torch
+tqdm
+numpy 
+matplotlib
+scipy
+peft
+transformers
