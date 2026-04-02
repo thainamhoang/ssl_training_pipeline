@@ -204,14 +204,14 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
     if mode == "lora":
         return SSLDownscaler(**base_kwargs, mode="lora", **lora_kwargs)
 
-    if mode in ("casd_frozen", "casd_lora"):
+    if mode == "casd":
         use_static = m.get("use_static", False)
         oro_t, lsm_t = (
             load_static_vars(cfg.data.hr_dir, hr_shape) if use_static else (None, None)
         )
         return CASD(
             **base_kwargs,
-            mode="frozen" if mode == "casd_frozen" else "lora",
+            mode=m.encoder_mode,
             **lora_kwargs,
             tap_layers=list(m.get("tap_layers", [4, 7, 14])),
             proj_dim=m.get("proj_dim", 256),
@@ -223,10 +223,10 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
             lsm_hr=lsm_t,
         )
 
-    if mode in ("fgd_frozen", "fgd_lora"):
+    if mode == "fgd":
         return FGD(
             **base_kwargs,
-            mode="frozen" if mode == "fgd_frozen" else "lora",
+            mode=m.encoder_mode,
             **lora_kwargs,
             use_multiscale=m.get("use_multiscale", True),
             tap_layers=list(m.get("tap_layers", [4, 7, 14, 24])),
