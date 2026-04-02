@@ -62,6 +62,7 @@ from transformers import AutoModel
 
 try:
     from peft import LoraConfig, get_peft_model
+
     _PEFT_AVAILABLE = True
 except ImportError:
     _PEFT_AVAILABLE = False
@@ -70,6 +71,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # ── Architecture helpers ───────────────────────────────────────────────────────
+
 
 def compute_ssl_size(
     lr_shape: tuple,
@@ -100,7 +102,7 @@ def compute_ssl_size(
 
     n_patches_h = ssl_H // patch_size
     n_patches_w = ssl_W // patch_size
-    n_patches   = n_patches_h * n_patches_w
+    n_patches = n_patches_h * n_patches_w
 
     return (ssl_H, ssl_W), n_patches_h, n_patches_w, n_patches
 
@@ -133,9 +135,7 @@ def build_encoder(
     Returns:
         encoder : nn.Module (base model or PEFT-wrapped model)
     """
-    assert mode in ("frozen", "lora"), (
-        f"mode must be 'frozen' or 'lora', got {mode!r}"
-    )
+    assert mode in ("frozen", "lora"), f"mode must be 'frozen' or 'lora', got {mode!r}"
     if mode == "lora" and not _PEFT_AVAILABLE:
         raise ImportError("pip install peft>=0.10.0 to use mode='lora'")
 
@@ -198,6 +198,7 @@ def init_conv_decoder(module: nn.Module) -> None:
 
 # ── Forward helper ─────────────────────────────────────────────────────────────
 
+
 def encoder_forward(
     encoder: nn.Module,
     mode: str,
@@ -232,6 +233,7 @@ def encoder_forward(
 
 
 # ── Optimizer ──────────────────────────────────────────────────────────────────
+
 
 def make_optimizer(
     model: nn.Module,
@@ -284,7 +286,7 @@ def make_optimizer(
 
     return torch.optim.AdamW(
         [
-            {"params": lora_params,    "lr": lr,         "weight_decay": weight_decay},
+            {"params": lora_params, "lr": lr, "weight_decay": weight_decay},
             {"params": decoder_params, "lr": decoder_lr, "weight_decay": 1e-4},
         ],
         betas=(0.9, 0.999),
@@ -292,6 +294,7 @@ def make_optimizer(
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
+
 
 def make_scheduler(
     optimizer: torch.optim.Optimizer,
@@ -336,6 +339,7 @@ def fast_forward_scheduler(scheduler, start_epoch: int) -> None:
 
 # ── Checkpoint ────────────────────────────────────────────────────────────────
 
+
 def save_checkpoint(
     path: str,
     epoch: int,
@@ -371,16 +375,16 @@ def save_checkpoint(
     """
     torch.save(
         {
-            "epoch":             epoch,
-            "model_state":       model.state_dict(),
-            "optimizer":         optimizer.state_dict(),
-            "scheduler":         scheduler.state_dict(),
-            "scaler":            scaler.state_dict(),
-            "best_val_rmse":     best_val_rmse,
+            "epoch": epoch,
+            "model_state": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
+            "best_val_rmse": best_val_rmse,
             "epochs_no_improve": epochs_no_improve,
-            "wandb_run_id":      wandb_run_id,
-            "model_key":         model_key,
-            "config":            OmegaConf.to_container(cfg, resolve=True),
+            "wandb_run_id": wandb_run_id,
+            "model_key": model_key,
+            "config": OmegaConf.to_container(cfg, resolve=True),
         },
         path,
     )
@@ -445,8 +449,14 @@ def load_checkpoint(
                 f"!= current {field}={current_val!r}"
             )
 
-    for attr in ("mode", "lora_r", "tap_layers", "use_static",
-                 "use_multiscale", "use_film"):
+    for attr in (
+        "mode",
+        "lora_r",
+        "tap_layers",
+        "use_static",
+        "use_multiscale",
+        "use_film",
+    ):
         if attr in saved_model_cfg and hasattr(model, attr):
             _warn_mismatch(attr, saved_model_cfg[attr], getattr(model, attr))
 
@@ -455,10 +465,10 @@ def load_checkpoint(
     scheduler.load_state_dict(ckpt["scheduler"])
     scaler.load_state_dict(ckpt["scaler"])
 
-    start_epoch        = ckpt["epoch"] + 1
-    best_val_rmse      = ckpt["best_val_rmse"]
-    epochs_no_improve  = ckpt["epochs_no_improve"]
-    wandb_run_id       = ckpt.get("wandb_run_id", None)
+    start_epoch = ckpt["epoch"] + 1
+    best_val_rmse = ckpt["best_val_rmse"]
+    epochs_no_improve = ckpt["epochs_no_improve"]
+    wandb_run_id = ckpt.get("wandb_run_id", None)
 
     print(
         f"Resumed from epoch {ckpt['epoch']} |  "
@@ -469,6 +479,7 @@ def load_checkpoint(
 
 
 # ── Train / eval mode helpers ─────────────────────────────────────────────────
+
 
 def _set_train_mode(model: nn.Module) -> None:
     """
@@ -497,6 +508,7 @@ def _set_eval_mode(model: nn.Module) -> None:
 
 
 # ── Train one epoch ───────────────────────────────────────────────────────────
+
 
 def train_one_epoch(
     model: nn.Module,
@@ -531,9 +543,9 @@ def train_one_epoch(
 
     _set_train_mode(model)
 
-    total_loss  = 0.0
-    sum_sq_err  = 0.0
-    n_samples   = 0
+    total_loss = 0.0
+    sum_sq_err = 0.0
+    n_samples = 0
 
     optimizer.zero_grad()
 
@@ -541,7 +553,7 @@ def train_one_epoch(
         tqdm(loader, desc=f"Train {epoch}", leave=False)
     ):
         lr_imagenet = lr_imagenet.to(DEVICE)
-        hr_norm     = hr_norm.to(DEVICE)
+        hr_norm = hr_norm.to(DEVICE)
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             pred = model(lr_imagenet)
@@ -549,12 +561,12 @@ def train_one_epoch(
 
         scaler.scale(loss).backward()
 
-        real_loss   = loss.item() * grad_accum_steps
+        real_loss = loss.item() * grad_accum_steps
         sum_sq_err += real_loss * hr_norm.numel()
-        n_samples  += hr_norm.numel()
+        n_samples += hr_norm.numel()
         total_loss += real_loss
 
-        is_last_batch = (i + 1 == len(loader))
+        is_last_batch = i + 1 == len(loader)
         if (i + 1) % grad_accum_steps == 0 or is_last_batch:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
@@ -574,91 +586,86 @@ def train_one_epoch(
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
     loader,
-    hr_shape: tuple,
+    bilinear_rmse: float,  # ← pre-computed, passed in
     split: str = "val",
 ) -> dict:
-    """
-    Evaluate model on a dataloader. Computes RMSE, Pearson r, bias,
-    and RMSE vs bilinear baseline.
-
-    Args:
-        model    : any downscaling model
-        loader   : DataLoader yielding (lr_imagenet, lr_norm, hr_norm)
-        hr_shape : (H_hr, W_hr) used for bilinear baseline resize
-        split    : metric key prefix, e.g. "val" or "test"
-
-    Returns:
-        dict with keys:
-            {split}/loss
-            {split}/rmse
-            {split}/pearson
-            {split}/bias
-            {split}/bilinear_rmse
-            {split}/rmse_vs_bilinear
-    """
     _set_eval_mode(model)
 
-    sum_sq_err   = 0.0
-    sum_bil_sq   = 0.0
+    sum_sq_err = 0.0
     total_pearson = 0.0
-    total_bias   = 0.0
-    n_batches    = 0
-    n_pixels     = 0
+    total_bias = 0.0
+    n_batches = 0
+    n_pixels = 0
 
-    for lr_imagenet, lr_norm, hr_norm in tqdm(
-        loader, desc=f"Eval {split}", leave=False
-    ):
+    for lr_imagenet, _, hr_norm in tqdm(loader, desc=f"Eval {split}", leave=False):
         lr_imagenet = lr_imagenet.to(DEVICE)
-        lr_norm     = lr_norm.to(DEVICE)
-        hr_norm     = hr_norm.to(DEVICE)
+        hr_norm = hr_norm.to(DEVICE)
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             pred = model(lr_imagenet).float()
 
         hr_norm = hr_norm.float()
-        B       = hr_norm.shape[0]
+        B = hr_norm.shape[0]
 
-        sum_sq_err  += ((pred - hr_norm) ** 2).sum().item()
-        total_bias  += (pred - hr_norm).mean().item()
-        n_pixels    += hr_norm.numel()
+        sum_sq_err += ((pred - hr_norm) ** 2).sum().item()
+        total_bias += (pred - hr_norm).mean().item()
+        n_pixels += hr_norm.numel()
 
         batch_pearson = 0.0
         for i in range(B):
-            p  = pred[i].flatten()
-            t  = hr_norm[i].flatten()
+            p = pred[i].flatten()
+            t = hr_norm[i].flatten()
             pc = p - p.mean()
             tc = t - t.mean()
-            r  = (pc * tc).sum() / (
-                torch.sqrt((pc ** 2).sum()) * torch.sqrt((tc ** 2).sum()) + 1e-8
+            r = (pc * tc).sum() / (
+                torch.sqrt((pc**2).sum()) * torch.sqrt((tc**2).sum()) + 1e-8
             )
             batch_pearson += r.item()
         total_pearson += batch_pearson / B
 
-        bil = F.interpolate(
-            lr_norm, size=hr_shape, mode="bilinear", align_corners=False
-        )
-        sum_bil_sq += ((bil - hr_norm) ** 2).sum().item()
-
         n_batches += 1
 
-    rmse     = (sum_sq_err / n_pixels) ** 0.5
-    bil_rmse = (sum_bil_sq / n_pixels) ** 0.5
+    # lr_norm is no longer needed in the loop — drop it from unpacking above
+    # (change the for loop to: for lr_imagenet, _, hr_norm in ...)
+
+    rmse = (sum_sq_err / n_pixels) ** 0.5
 
     return {
-        f"{split}/loss":             sum_sq_err / n_pixels,
-        f"{split}/rmse":             rmse,
-        f"{split}/pearson":          total_pearson / n_batches,
-        f"{split}/bias":             total_bias / n_batches,
-        f"{split}/bilinear_rmse":    bil_rmse,
-        f"{split}/rmse_vs_bilinear": rmse - bil_rmse,
+        f"{split}/loss": sum_sq_err / n_pixels,
+        f"{split}/rmse": rmse,
+        f"{split}/pearson": total_pearson / n_batches,
+        f"{split}/bias": total_bias / n_batches,
+        f"{split}/bilinear_rmse": bilinear_rmse,
+        f"{split}/rmse_vs_bilinear": rmse - bilinear_rmse,
     }
 
 
+@torch.no_grad()
+def compute_bilinear_rmse(loader, hr_shape: tuple) -> float:
+    """
+    Pre-compute bilinear baseline RMSE once before training starts.
+    Pass the result to evaluate() via the bilinear_rmse argument.
+    """
+    sum_sq = 0.0
+    n_pixels = 0
+    for _, lr_norm, hr_norm in tqdm(loader, desc="Bilinear baseline", leave=False):
+        lr_norm = lr_norm.to(DEVICE)
+        hr_norm = hr_norm.to(DEVICE).float()
+        bil = F.interpolate(
+            lr_norm, size=hr_shape, mode="bilinear", align_corners=False
+        )
+        sum_sq += ((bil - hr_norm) ** 2).sum().item()
+        n_pixels += hr_norm.numel()
+    return (sum_sq / n_pixels) ** 0.5
+
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -666,5 +673,5 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark     = False
+    torch.backends.cudnn.benchmark = False
     print(f"Set seed to {seed}")

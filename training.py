@@ -4,8 +4,10 @@ training.py
 Unified training script for all SSL downscaling models:
     frozen      → FrozenSSLDownscaler  (Pilot 2)
     lora        → SSLDownscaler        (Pilot 3)
-    casd        → CASD frozen/LoRA     (Pilot 4)
-    fgd         → FGD frozen/LoRA      (Pilot 5)
+    casd_frozen → CASD frozen          (Pilot 4)
+    casd_lora   → CASD LoRA            (Pilot 4)
+    fgd_frozen  → FGD frozen           (Pilot 5)
+    fgd_lora    → FGD LoRA             (Pilot 5)
 
 Usage:
     python training.py --config configs/lora.yaml
@@ -50,6 +52,7 @@ from trainer_utils import (
     load_checkpoint,
     train_one_epoch,
     evaluate,
+    compute_bilinear_rmse,
     set_seed,
 )
 
@@ -145,7 +148,6 @@ def load_static_vars(hr_dir: str, hr_shape: tuple):
     oro_t = torch.tensor(oro_np)
     lsm_t = torch.tensor(lsm_np)
 
-    # Squeeze extra leading dims e.g. [1, H, W] → [H, W]
     while oro_t.dim() > 2:
         oro_t = oro_t.squeeze(0)
     while lsm_t.dim() > 2:
@@ -178,13 +180,10 @@ def load_static_vars(hr_dir: str, hr_shape: tuple):
 def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
     """
     Construct the correct model class from config mode string.
-
-    Returns model (on CPU — caller moves to DEVICE).
-    Raises ValueError for unknown mode.
+    Returns model on CPU — caller moves to DEVICE.
     """
-    m = cfg.model  # shorthand
+    m = cfg.model
 
-    # Shared kwargs present in every model
     base_kwargs = dict(
         model_id=model_id,
         patch_size=patch_size,
@@ -193,8 +192,6 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
         upscale=m.upscale,
         hidden_dim=m.hidden_dim,
     )
-
-    # LoRA kwargs shared by SSLDownscaler, CASD, FGD
     lora_kwargs = dict(
         lora_r=m.get("lora_r", 8),
         lora_alpha=m.get("lora_alpha", None),
@@ -207,14 +204,14 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
     if mode == "lora":
         return SSLDownscaler(**base_kwargs, mode="lora", **lora_kwargs)
 
-    if mode == "casd":
+    if mode in ("casd_frozen", "casd_lora"):
         use_static = m.get("use_static", False)
         oro_t, lsm_t = (
             load_static_vars(cfg.data.hr_dir, hr_shape) if use_static else (None, None)
         )
         return CASD(
             **base_kwargs,
-            mode=m.encoder_mode,
+            mode="frozen" if mode == "casd_frozen" else "lora",
             **lora_kwargs,
             tap_layers=list(m.get("tap_layers", [4, 7, 14])),
             proj_dim=m.get("proj_dim", 256),
@@ -226,10 +223,10 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
             lsm_hr=lsm_t,
         )
 
-    if mode == "fgd":
+    if mode in ("fgd_frozen", "fgd_lora"):
         return FGD(
             **base_kwargs,
-            mode=m.encoder_mode,
+            mode="frozen" if mode == "fgd_frozen" else "lora",
             **lora_kwargs,
             use_multiscale=m.get("use_multiscale", True),
             tap_layers=list(m.get("tap_layers", [4, 7, 14, 24])),
@@ -237,12 +234,15 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
             film_hidden=m.get("film_hidden", 128),
         )
 
-    raise ValueError(f"Unknown mode '{mode}'. Expected: frozen | lora | casd | fgd")
+    raise ValueError(
+        f"Unknown mode '{mode}'. "
+        "Expected: frozen | lora | casd_frozen | casd_lora | fgd_frozen | fgd_lora"
+    )
 
 
 def _watched_module(model, mode):
     """Return the decoder submodule to watch in WandB."""
-    if mode == "casd":
+    if mode in ("casd_frozen", "casd_lora"):
         return model.output_head
     return model.decoder
 
@@ -258,7 +258,7 @@ def main():
     print(f"LR directory : {LR_DIR}")
     print(f"HR directory : {HR_DIR}")
 
-    # ── Datasets ──────────────────────────────────────────────────────────────
+    # ── Datasets + loaders ────────────────────────────────────────────────────
     train_ds = DownscalingDataset(
         LR_DIR,
         HR_DIR,
@@ -297,6 +297,13 @@ def main():
     val_loader = make_loader(val_ds, shuffle=False)
     test_loader = make_loader(test_ds, shuffle=False)
 
+    # ── Bilinear baselines (computed once, never changes) ─────────────────────
+    print("Computing bilinear baselines...")
+    val_bilinear_rmse = compute_bilinear_rmse(val_loader, hr_shape)
+    test_bilinear_rmse = compute_bilinear_rmse(test_loader, hr_shape)
+    print(f"  Val  bilinear RMSE : {val_bilinear_rmse:.4f}")
+    print(f"  Test bilinear RMSE : {test_bilinear_rmse:.4f}")
+
     # ── Model + optimizer ──────────────────────────────────────────────────────
     model = _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg).to(DEVICE)
 
@@ -314,13 +321,11 @@ def main():
     scaler = torch.amp.GradScaler("cuda")
 
     # ── Loss function ──────────────────────────────────────────────────────────
-    # FGD models support an optional spectral term via spectral_lambda.
-    # All other models use plain MSE (spectral_lambda defaults to 0.0).
     spectral_lambda = cfg.training.get("spectral_lambda", 0.0)
     loss_fn = (
         functools.partial(fgd_loss, spectral_lambda=spectral_lambda)
         if spectral_lambda > 0.0
-        else None  # trainer_utils.train_one_epoch defaults to F.mse_loss
+        else None
     )
 
     # ── Resume or fresh start ──────────────────────────────────────────────────
@@ -361,7 +366,13 @@ def main():
             grad_accum_steps=cfg.training.grad_accum_steps,
             loss_fn=loss_fn,
         )
-        val_metrics = evaluate(model, val_loader, hr_shape, split="val")
+        val_metrics = evaluate(
+            model,
+            val_loader,
+            hr_shape,
+            bilinear_rmse=val_bilinear_rmse,
+            split="val",
+        )
         scheduler.step()
 
         current_lr = float(scheduler.get_last_lr()[0])
@@ -382,7 +393,6 @@ def main():
             f"vs Bilinear: {val_metrics['val/rmse_vs_bilinear']:+.4f}"
         )
 
-        # Shared kwargs for both checkpoint saves this epoch
         ckpt_kwargs = dict(
             epoch=epoch,
             model=model,
@@ -414,7 +424,13 @@ def main():
     best_ckpt = torch.load(CKPT_BEST, map_location=DEVICE)
     model.load_state_dict(best_ckpt["model_state"])
 
-    test_metrics = evaluate(model, test_loader, hr_shape, split="test")
+    test_metrics = evaluate(
+        model,
+        test_loader,
+        hr_shape,
+        bilinear_rmse=test_bilinear_rmse,
+        split="test",
+    )
     improvement = (
         (test_metrics["test/bilinear_rmse"] - test_metrics["test/rmse"])
         / test_metrics["test/bilinear_rmse"]
@@ -428,7 +444,6 @@ def main():
     )
     run.summary["test/rmse"] = float(test_metrics["test/rmse"])
     run.summary["test/pearson"] = float(test_metrics["test/pearson"])
-    run.summary["test/bilinear_rmse"] = float(test_metrics["test/bilinear_rmse"])
     run.summary["test/improvement_pct"] = float(improvement)
 
     print(f"\n── Test Results ({model_key} / {mode}) ──────────────────────")
