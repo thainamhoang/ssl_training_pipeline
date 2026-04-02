@@ -6,7 +6,8 @@ global_vars:
 
 data:
   type: era5
-  lr_dir: /workspace/data/${global_vars.lr_deg}deg/${global_vars.var}
+  lr_dir: 
+  
   hr_dir: /workspace/data/${global_vars.hr_deg}deg/${global_vars.var}
   stride: 6
   batch_size: 128
@@ -19,7 +20,7 @@ model:
   mode: fgd
   model_id: dinov3-sat
   upscale: 4
-  hidden_dim: 128
+  hidden_dim: 256
   encoder_mode: lora
   lora_r: 8
   lora_alpha: 16
