@@ -9,7 +9,6 @@ data:
   lr_dir: /workspace/data/${global_vars.lr_deg}deg/${global_vars.var}
   hr_dir: /workspace/data/${global_vars.hr_deg}deg/${global_vars.var}
   stride: 6
-  preload: false
   batch_size: 128
   num_workers: 6
   pin_memory: true
@@ -17,28 +16,31 @@ data:
   prefetch_factor: 2
 
 model:
-  mode: casd_frozen
+  mode: fgd
   model_id: dinov3-sat
   upscale: 4
-  tap_layers: [4, 7, 14]
-  proj_dim: 256
-  n_heads: 8
-  n_ca_layers: 2
-  ca_dropout: 0.0
-  use_static: false
+  hidden_dim: 128
+  encoder_mode: lora
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  use_multiscale: true
+  tap_layers: [4, 7, 14, 24]
+  use_film: false
+  film_hidden: 128
 
-# dinov3-sat config  
 training:
   max_epochs: 80
-  lr: 5e-5                # LoRA LR (ignored for casd_frozen)
-  decoder_lr: 2e-4        # decoder LR (used for all CASD modes)
+  lr: 5e-5
+  decoder_lr: 2e-4
   weight_decay: 1e-2
   patience: 10
   warmup_epochs: 5
   grad_accum_steps: 1
-  ckpt_dir: /scratch/izar/hoang/SSL/checkpoints/${data.type}/${model.model_id}/${model.mode}
+  spectral_lambda: 0.0
+  ckpt_dir: /workspace/checkpoints/${data.type}/${model.model_id}_${model.mode}_${model.encoder_mode}
 
 wandb:
   entity: thainamhoang
-  project: SSL Climate
-  name: ${model.mode}_${model.model_id}_${model.upscale}x_${global_vars.lr_deg}deg_${global_vars.hr_deg}deg
+  project: ERA5 SSL
+  name: fgd_A_${model.encoder_mode}_${model.model_id}_${model.upscale}x

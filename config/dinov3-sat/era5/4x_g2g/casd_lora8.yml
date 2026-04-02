@@ -17,26 +17,27 @@ data:
   prefetch_factor: 2
 
 model:
-  mode: casd_lora
+  mode: casd
   model_id: dinov3-sat
+  encoder_mode: lora
   upscale: 4
   tap_layers: [4, 7, 14]
   proj_dim: 128
   n_heads: 4
   n_ca_layers: 1
-  ca_dropout: 0.0
-  use_static: false       # set true when constants.npz confirmed
-  lora_r: 8               # only used when mode=casd_lora
-  lora_alpha: 16          # only used when mode=casd_lora
-  lora_dropout: 0.0       # only used when mode=casd_lora
+  ca_dropout: 0.1
+  use_static: true       # set true when constants.npz confirmed
+  lora_r: 8               # only used when encoder_mode=lora
+  lora_alpha: 16          # only used when encoder_mode=lora
+  lora_dropout: 0.0       # only used when encoder_mode=lora
 
 training:
   max_epochs: 80
-  lr: 5e-5                # LoRA LR (ignored for casd_frozen)
+  lr: 2e-5                # LoRA LR (ignored for encoder_mode=frozen)
   decoder_lr: 2e-4        # decoder LR (used for all CASD modes)
-  weight_decay: 1e-2
+  weight_decay: 0.1
   patience: 10
-  warmup_epochs: 5
+  warmup_epochs: 8
   grad_accum_steps: 4
   ckpt_dir: /workspace/checkpoints/${data.type}/${model.model_id}/${model.mode}
 

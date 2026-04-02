@@ -1,45 +1,84 @@
+"""
+training.py
+
+Unified training script for all SSL downscaling models:
+    frozen      → FrozenSSLDownscaler  (Pilot 2)
+    lora        → SSLDownscaler        (Pilot 3)
+    casd_frozen → CASD frozen          (Pilot 4)
+    casd_lora   → CASD LoRA            (Pilot 4)
+    fgd_frozen  → FGD frozen           (Pilot 5)
+    fgd_lora    → FGD LoRA             (Pilot 5)
+
+Usage:
+    python training.py --config configs/lora.yaml
+    python training.py --config configs/fgd_lora.yaml --resume checkpoints/latest.pt
+
+Expected config fields:
+    global_vars: seed
+    model:       model_id, mode, upscale, hidden_dim,
+                 lora_r, lora_alpha, lora_dropout,      # LoRA models
+                 tap_layers, proj_dim, n_heads,          # CASD
+                 n_ca_layers, ca_dropout, use_static,   # CASD
+                 use_multiscale, use_film, film_hidden,  # FGD
+    data:        lr_dir, hr_dir, stride, batch_size,
+                 num_workers, pin_memory, persistent_workers, prefetch_factor
+    training:    lr, decoder_lr, weight_decay,
+                 warmup_epochs, max_epochs, grad_accum_steps, patience,
+                 spectral_lambda,                        # FGD only, default 0.0
+                 ckpt_dir
+    wandb:       entity, project, name
+"""
+
 import os
+import functools
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from downscaling_dataset import DownscalingDataset
-from frozen_ssl import FrozenSSLDownscaler
-from ssl_downscaler import SSLDownscaler
-from casd import CASD
-from trainer_utils import (
-    make_scheduler,
-    train_one_epoch,
-    evaluate,
-    save_checkpoint,
-    load_checkpoint,
-    set_seed,
-)
-from dotenv import load_dotenv
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
 import wandb
+from dotenv import load_dotenv
+
+from dataset.downscaling_dataset import DownscalingDataset
+from model.frozen_ssl import FrozenSSLDownscaler
+from model.ssl_downscaler import SSLDownscaler
+from model.casd import CASD
+from model.fgd import FGD, fgd_loss
+from trainer_utils import (
+    make_optimizer,
+    make_scheduler,
+    save_checkpoint,
+    load_checkpoint,
+    train_one_epoch,
+    evaluate,
+    set_seed,
+)
 
 # ── Token config ──────────────────────────────────────────────────────────────
+
 load_dotenv()
 hf_token = os.getenv("HF_TOKEN")
 wandb_api_key = os.getenv("WANDB_API_KEY")
 if not hf_token or not wandb_api_key:
-    raise ValueError("HF_TOKEN and WANDB_API_KEY must be set")
-else:
-    os.environ["HF_TOKEN"] = hf_token
-    wandb.login(wandb_api_key)
+    raise ValueError("HF_TOKEN and WANDB_API_KEY must be set in environment / .env")
+os.environ["HF_TOKEN"] = hf_token
+wandb.login(wandb_api_key)
 
-# ── Parser and config ─────────────────────────────────────────────────────────
+# ── CLI + config ──────────────────────────────────────────────────────────────
+
 parser = ArgumentParser()
-parser.add_argument("--config", type=str, required=True, help="Path to config file")
+parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
 parser.add_argument(
     "--resume", type=str, default=None, help="Path to checkpoint to resume from"
 )
 args = parser.parse_args()
 cfg = OmegaConf.load(args.config)
+
 set_seed(cfg.global_vars.seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ── Model registry ────────────────────────────────────────────────────────────
 
 MODEL_REGISTRY = {
     "dinov2-l": {"model_id": "facebook/dinov2-large", "patch_size": 14},
@@ -51,137 +90,195 @@ MODEL_REGISTRY = {
 }
 
 model_key = cfg.model.model_id
-assert model_key in MODEL_REGISTRY, f"Unknown model_id '{model_key}'"
+assert model_key in MODEL_REGISTRY, (
+    f"Unknown model_id '{model_key}'. Valid keys: {list(MODEL_REGISTRY)}"
+)
 model_id = MODEL_REGISTRY[model_key]["model_id"]
 patch_size = MODEL_REGISTRY[model_key]["patch_size"]
+
+# ── Checkpoint paths ──────────────────────────────────────────────────────────
 
 CKPT_DIR = cfg.training.get("ckpt_dir", "./checkpoints")
 os.makedirs(CKPT_DIR, exist_ok=True)
 CKPT_LATEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_latest.pt")
 CKPT_BEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_best.pt")
 
-LR_DIR = cfg.data.lr_dir
-HR_DIR = cfg.data.hr_dir
-print(f"Using LR directory: {LR_DIR}")
-print(f"Using HR directory: {HR_DIR}")
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-# ── Static variable loader ────────────────────────────────────────────────────
 def load_static_vars(hr_dir: str, hr_shape: tuple):
     """
     Load orography and land-sea mask from ERA5 constants file.
-    Normalises orography to z-score. LSM kept as {0, 1}.
-    Resizes to hr_shape if needed via bilinear / nearest interpolation.
 
-    Returns (oro_t, lsm_t) as float32 CPU tensors of shape hr_shape.
+    Tries common WeatherBench filenames: constants.npz, invariant.npz, static.npz
+    Orography keys tried: orography, z, oro
+    LSM keys tried:       lsm, land_sea_mask, lsm_mask
 
-    Tries common file names used by WeatherBench ERA5 datasets:
-        constants.npz, invariant.npz, static.npz
-    Keys tried: orography, z, oro; lsm, land_sea_mask, lsm_mask
+    Returns (oro_t, lsm_t) — float32 CPU tensors of shape hr_shape.
+    Orography is z-score normalised; LSM is clamped to [0, 1].
     """
-    candidates = ["constants.npz", "invariant.npz", "static.npz"]
-    data = None
-    for fname in candidates:
+    for fname in ("constants.npz", "invariant.npz", "static.npz"):
         fpath = os.path.join(hr_dir, fname)
         if os.path.exists(fpath):
             data = np.load(fpath)
             print(f"Loaded static variables from {fpath}")
             print(f"  Available keys: {list(data.keys())}")
             break
-
-    if data is None:
+    else:
         raise FileNotFoundError(
             f"No constants file found in {hr_dir}. "
-            f"Tried: {candidates}. "
-            f"Set use_static=false in config to skip static variables."
+            "Set use_static=false in config to skip static variables."
         )
 
-    # Orography
-    for key in ["orography", "z", "oro"]:
+    for key in ("orography", "z", "oro"):
         if key in data:
             oro_np = data[key].astype(np.float32)
             break
     else:
         raise KeyError(f"No orography key found. Available: {list(data.keys())}")
 
-    # Land-sea mask
-    for key in ["lsm", "land_sea_mask", "lsm_mask"]:
+    for key in ("lsm", "land_sea_mask", "lsm_mask"):
         if key in data:
             lsm_np = data[key].astype(np.float32)
             break
     else:
         raise KeyError(f"No LSM key found. Available: {list(data.keys())}")
 
-    oro_t = torch.tensor(oro_np, dtype=torch.float32)
-    lsm_t = torch.tensor(lsm_np, dtype=torch.float32)
+    oro_t = torch.tensor(oro_np)
+    lsm_t = torch.tensor(lsm_np)
 
-    # Squeeze to 2D if extra dims present (e.g. [1, H, W] → [H, W])
+    # Squeeze extra leading dims e.g. [1, H, W] → [H, W]
     while oro_t.dim() > 2:
         oro_t = oro_t.squeeze(0)
     while lsm_t.dim() > 2:
         lsm_t = lsm_t.squeeze(0)
 
-    # Resize to hr_shape if not already correct
     H_hr, W_hr = hr_shape
     if tuple(oro_t.shape) != (H_hr, W_hr):
         print(f"  Resizing orography {tuple(oro_t.shape)} → {hr_shape}")
         oro_t = F.interpolate(
-            oro_t[None, None],
-            size=(H_hr, W_hr),
-            mode="bilinear",
-            align_corners=False,
+            oro_t[None, None], size=(H_hr, W_hr), mode="bilinear", align_corners=False
         ).squeeze()
     if tuple(lsm_t.shape) != (H_hr, W_hr):
         print(f"  Resizing LSM {tuple(lsm_t.shape)} → {hr_shape}")
         lsm_t = F.interpolate(
-            lsm_t[None, None],
-            size=(H_hr, W_hr),
-            mode="nearest",
+            lsm_t[None, None], size=(H_hr, W_hr), mode="nearest"
         ).squeeze()
 
-    # Z-score normalise orography; clamp LSM to {0, 1}
     oro_t = (oro_t - oro_t.mean()) / (oro_t.std() + 1e-8)
     lsm_t = lsm_t.clamp(0.0, 1.0)
 
     print(
-        f"  Orography: mean={oro_t.mean():.3f}, std={oro_t.std():.3f}, "
-        f"shape={tuple(oro_t.shape)}"
+        f"  Orography : mean={oro_t.mean():.3f}, std={oro_t.std():.3f}, shape={tuple(oro_t.shape)}"
     )
     print(
-        f"  LSM      : min={lsm_t.min():.1f}, max={lsm_t.max():.1f}, "
-        f"shape={tuple(lsm_t.shape)}"
+        f"  LSM       : min={lsm_t.min():.1f},  max={lsm_t.max():.1f},  shape={tuple(lsm_t.shape)}"
     )
-
     return oro_t, lsm_t
 
 
+def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
+    """
+    Construct the correct model class from config mode string.
+
+    Returns model (on CPU — caller moves to DEVICE).
+    Raises ValueError for unknown mode.
+    """
+    m = cfg.model  # shorthand
+
+    # Shared kwargs present in every model
+    base_kwargs = dict(
+        model_id=model_id,
+        patch_size=patch_size,
+        lr_shape=lr_shape,
+        hr_shape=hr_shape,
+        upscale=m.upscale,
+        hidden_dim=m.hidden_dim,
+    )
+
+    # LoRA kwargs shared by SSLDownscaler, CASD, FGD
+    lora_kwargs = dict(
+        lora_r=m.get("lora_r", 8),
+        lora_alpha=m.get("lora_alpha", None),
+        lora_dropout=m.get("lora_dropout", 0.0),
+    )
+
+    if mode == "frozen":
+        return FrozenSSLDownscaler(**base_kwargs)
+
+    if mode == "lora":
+        return SSLDownscaler(**base_kwargs, mode="lora", **lora_kwargs)
+
+    if mode in ("casd_frozen", "casd_lora"):
+        use_static = m.get("use_static", False)
+        oro_t, lsm_t = (
+            load_static_vars(cfg.data.hr_dir, hr_shape) if use_static else (None, None)
+        )
+        return CASD(
+            **base_kwargs,
+            mode="frozen" if mode == "casd_frozen" else "lora",
+            **lora_kwargs,
+            tap_layers=list(m.get("tap_layers", [4, 7, 14])),
+            proj_dim=m.get("proj_dim", 256),
+            n_heads=m.get("n_heads", 8),
+            n_ca_layers=m.get("n_ca_layers", 2),
+            ca_dropout=m.get("ca_dropout", 0.0),
+            use_static=use_static,
+            oro_hr=oro_t,
+            lsm_hr=lsm_t,
+        )
+
+    if mode in ("fgd_frozen", "fgd_lora"):
+        return FGD(
+            **base_kwargs,
+            mode="frozen" if mode == "fgd_frozen" else "lora",
+            **lora_kwargs,
+            use_multiscale=m.get("use_multiscale", True),
+            tap_layers=list(m.get("tap_layers", [4, 7, 14, 24])),
+            use_film=m.get("use_film", False),
+            film_hidden=m.get("film_hidden", 128),
+        )
+
+    raise ValueError(
+        f"Unknown mode '{mode}'. "
+        "Expected: frozen | lora | casd_frozen | casd_lora | fgd_frozen | fgd_lora"
+    )
+
+
+def _watched_module(model, mode):
+    """Return the decoder submodule to watch in WandB."""
+    if mode in ("casd_frozen", "casd_lora"):
+        return model.output_head
+    return model.decoder
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+
 def main():
+    mode = cfg.model.mode
+    LR_DIR = cfg.data.lr_dir
+    HR_DIR = cfg.data.hr_dir
+
+    print(f"LR directory : {LR_DIR}")
+    print(f"HR directory : {HR_DIR}")
+
     # ── Datasets ──────────────────────────────────────────────────────────────
     train_ds = DownscalingDataset(
         LR_DIR,
         HR_DIR,
         "train",
         stride=cfg.data.stride,
-        lr_preload=True,  # always — LR is ~5GB total
-        hr_preload=False,  # HR train is ~38GB — keep lazy
+        lr_preload=True,
+        hr_preload=False,
     )
     val_ds = DownscalingDataset(
-        LR_DIR,
-        HR_DIR,
-        "val",
-        stride=cfg.data.stride,
-        lr_preload=True,
-        hr_preload=True,  # HR val is small — preload
+        LR_DIR, HR_DIR, "val", stride=cfg.data.stride, lr_preload=True, hr_preload=True
     )
     test_ds = DownscalingDataset(
-        LR_DIR,
-        HR_DIR,
-        "test",
-        stride=cfg.data.stride,
-        lr_preload=True,
-        hr_preload=True,  # HR test is small — preload
+        LR_DIR, HR_DIR, "test", stride=cfg.data.stride, lr_preload=True, hr_preload=True
     )
+
     lr_shape = train_ds.lr_shape
     hr_shape = train_ds.hr_shape
 
@@ -205,90 +302,31 @@ def main():
     val_loader = make_loader(val_ds, shuffle=False)
     test_loader = make_loader(test_ds, shuffle=False)
 
-    # ── Model ──────────────────────────────────────────────────────────────────
-    mode = cfg.model.mode
+    # ── Model + optimizer ──────────────────────────────────────────────────────
+    model = _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg).to(DEVICE)
 
-    if mode == "frozen":
-        model = FrozenSSLDownscaler(
-            model_id=model_id,
-            patch_size=patch_size,
-            lr_shape=lr_shape,
-            hr_shape=hr_shape,
-            upscale=cfg.model.upscale,
-            hidden_dim=cfg.model.hidden_dim,
-        ).to(DEVICE)
-
-        optimizer = model.make_optimizer(
-            lr=cfg.training.lr,
-            weight_decay=cfg.training.weight_decay,
-        )
-
-    elif mode == "lora":
-        model = SSLDownscaler(
-            model_id=model_id,
-            patch_size=patch_size,
-            lr_shape=lr_shape,
-            hr_shape=hr_shape,
-            upscale=cfg.model.upscale,
-            hidden_dim=cfg.model.hidden_dim,
-            mode=mode,
-            lora_r=cfg.model.lora_r,
-            lora_alpha=cfg.model.lora_alpha,
-            lora_dropout=cfg.model.lora_dropout,
-        ).to(DEVICE)
-
-        optimizer = model.make_optimizer(
-            lr=cfg.training.lr,
-            decoder_lr=cfg.training.decoder_lr,
-            weight_decay=cfg.training.weight_decay,
-        )
-
-    elif mode in ("casd_frozen", "casd_lora"):
-        # ── Load static variables if requested ────────────────────────────
-        use_static = cfg.model.get("use_static", False)
-        oro_t, lsm_t = None, None
-        if use_static:
-            oro_t, lsm_t = load_static_vars(HR_DIR, hr_shape)
-
-        # Encoder mode: casd_frozen → "frozen", casd_lora → "lora"
-        encoder_mode = "frozen" if mode == "casd_frozen" else "lora"
-
-        model = CASD(
-            model_id=model_id,
-            patch_size=patch_size,
-            lr_shape=lr_shape,
-            hr_shape=hr_shape,
-            mode=encoder_mode,
-            lora_r=cfg.model.get("lora_r", 8),
-            lora_alpha=cfg.model.get("lora_alpha", None),
-            lora_dropout=cfg.model.get("lora_dropout", 0.0),
-            tap_layers=list(cfg.model.get("tap_layers", [4, 7, 14])),
-            proj_dim=cfg.model.get("proj_dim", 256),
-            n_heads=cfg.model.get("n_heads", 8),
-            n_ca_layers=cfg.model.get("n_ca_layers", 2),
-            ca_dropout=cfg.model.get("ca_dropout", 0.0),
-            use_static=use_static,
-            oro_hr=oro_t,
-            lsm_hr=lsm_t,
-        ).to(DEVICE)
-
-        optimizer = model.make_optimizer(
-            lr=cfg.training.get("lr", 5e-5),
-            decoder_lr=cfg.training.decoder_lr,
-            weight_decay=cfg.training.weight_decay,
-        )
-
-    else:
-        raise ValueError(
-            f"Unknown mode '{mode}'. Expected: frozen | lora | casd_frozen | casd_lora"
-        )
-
+    optimizer = make_optimizer(
+        model,
+        lr=cfg.training.get("lr", 5e-5),
+        decoder_lr=cfg.training.decoder_lr,
+        weight_decay=cfg.training.weight_decay,
+    )
     scheduler = make_scheduler(
         optimizer,
         warmup_epochs=cfg.training.warmup_epochs,
         max_epochs=cfg.training.max_epochs,
     )
     scaler = torch.amp.GradScaler("cuda")
+
+    # ── Loss function ──────────────────────────────────────────────────────────
+    # FGD models support an optional spectral term via spectral_lambda.
+    # All other models use plain MSE (spectral_lambda defaults to 0.0).
+    spectral_lambda = cfg.training.get("spectral_lambda", 0.0)
+    loss_fn = (
+        functools.partial(fgd_loss, spectral_lambda=spectral_lambda)
+        if spectral_lambda > 0.0
+        else None  # trainer_utils.train_one_epoch defaults to F.mse_loss
+    )
 
     # ── Resume or fresh start ──────────────────────────────────────────────────
     start_epoch = 1
@@ -297,7 +335,6 @@ def main():
     wandb_run_id = None
 
     resume_path = args.resume or (CKPT_LATEST if os.path.exists(CKPT_LATEST) else None)
-
     if resume_path and os.path.exists(resume_path):
         start_epoch, best_val_rmse, epochs_no_improve, wandb_run_id = load_checkpoint(
             resume_path, model, optimizer, scheduler, scaler
@@ -316,12 +353,7 @@ def main():
     )
     wandb_run_id = run.id
     print(f"WandB run: {run.url}")
-
-    # Watch the appropriate decoder module for gradient logging
-    if mode in ("casd_frozen", "casd_lora"):
-        run.watch(model.output_head, log="all", log_freq=50)
-    else:
-        run.watch(model.decoder, log="all", log_freq=50)
+    run.watch(_watched_module(model, mode), log="all", log_freq=50)
 
     # ── Training loop ──────────────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg.training.max_epochs + 1):
@@ -332,12 +364,12 @@ def main():
             scaler,
             epoch,
             grad_accum_steps=cfg.training.grad_accum_steps,
+            loss_fn=loss_fn,
         )
         val_metrics = evaluate(model, val_loader, hr_shape, split="val")
         scheduler.step()
 
         current_lr = float(scheduler.get_last_lr()[0])
-
         log_dict = {
             "epoch": epoch,
             "lr": current_lr,
@@ -355,38 +387,25 @@ def main():
             f"vs Bilinear: {val_metrics['val/rmse_vs_bilinear']:+.4f}"
         )
 
-        # ── Save latest checkpoint every epoch ────────────────────────────
-        save_checkpoint(
-            CKPT_LATEST,
-            epoch,
-            model,
-            model_key,
-            cfg,
-            optimizer,
-            scheduler,
-            scaler,
-            best_val_rmse,
-            epochs_no_improve,
-            wandb_run_id,
+        # Shared kwargs for both checkpoint saves this epoch
+        ckpt_kwargs = dict(
+            epoch=epoch,
+            model=model,
+            model_key=model_key,
+            cfg=cfg,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            epochs_no_improve=epochs_no_improve,
+            wandb_run_id=wandb_run_id,
         )
 
-        # ── Save best checkpoint ───────────────────────────────────────────
+        save_checkpoint(CKPT_LATEST, best_val_rmse=best_val_rmse, **ckpt_kwargs)
+
         if val_metrics["val/rmse"] < best_val_rmse:
             best_val_rmse = val_metrics["val/rmse"]
             epochs_no_improve = 0
-            save_checkpoint(
-                CKPT_BEST,
-                epoch,
-                model,
-                model_key,
-                cfg,
-                optimizer,
-                scheduler,
-                scaler,
-                best_val_rmse,
-                epochs_no_improve,
-                wandb_run_id,
-            )
+            save_checkpoint(CKPT_BEST, best_val_rmse=best_val_rmse, **ckpt_kwargs)
             run.log({"best/val_rmse": float(best_val_rmse)}, step=epoch, commit=False)
             print(f"  → New best: {best_val_rmse:.4f} (saved to {CKPT_BEST})")
         else:
