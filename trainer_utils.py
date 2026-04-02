@@ -635,6 +635,9 @@ def evaluate(
 
     rmse = (sum_sq_err / n_pixels) ** 0.5
 
+    print("FiLM gamma range:", model.film.mlp[-1].weight.abs().max().item())
+    print("FiLM beta range:", model.film.mlp[-1].bias.abs().max().item())
+
     return {
         f"{split}/loss": sum_sq_err / n_pixels,
         f"{split}/rmse": rmse,
