@@ -4,10 +4,8 @@ training.py
 Unified training script for all SSL downscaling models:
     frozen      → FrozenSSLDownscaler  (Pilot 2)
     lora        → SSLDownscaler        (Pilot 3)
-    casd_frozen → CASD frozen          (Pilot 4)
-    casd_lora   → CASD LoRA            (Pilot 4)
-    fgd_frozen  → FGD frozen           (Pilot 5)
-    fgd_lora    → FGD LoRA             (Pilot 5)
+    casd        → CASD frozen/LoRA     (Pilot 4)
+    fgd         → FGD frozen/LoRA      (Pilot 5)
 
 Usage:
     python training.py --config configs/lora.yaml
@@ -209,14 +207,14 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
     if mode == "lora":
         return SSLDownscaler(**base_kwargs, mode="lora", **lora_kwargs)
 
-    if mode in ("casd_frozen", "casd_lora"):
+    if mode == "casd":
         use_static = m.get("use_static", False)
         oro_t, lsm_t = (
             load_static_vars(cfg.data.hr_dir, hr_shape) if use_static else (None, None)
         )
         return CASD(
             **base_kwargs,
-            mode="frozen" if mode == "casd_frozen" else "lora",
+            mode=m.encoder_mode,
             **lora_kwargs,
             tap_layers=list(m.get("tap_layers", [4, 7, 14])),
             proj_dim=m.get("proj_dim", 256),
@@ -228,10 +226,10 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
             lsm_hr=lsm_t,
         )
 
-    if mode in ("fgd_frozen", "fgd_lora"):
+    if mode == "fgd":
         return FGD(
             **base_kwargs,
-            mode="frozen" if mode == "fgd_frozen" else "lora",
+            mode=m.encoder_mode,
             **lora_kwargs,
             use_multiscale=m.get("use_multiscale", True),
             tap_layers=list(m.get("tap_layers", [4, 7, 14, 24])),
@@ -239,15 +237,12 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
             film_hidden=m.get("film_hidden", 128),
         )
 
-    raise ValueError(
-        f"Unknown mode '{mode}'. "
-        "Expected: frozen | lora | casd_frozen | casd_lora | fgd_frozen | fgd_lora"
-    )
+    raise ValueError(f"Unknown mode '{mode}'. Expected: frozen | lora | casd | fgd")
 
 
 def _watched_module(model, mode):
     """Return the decoder submodule to watch in WandB."""
-    if mode in ("casd_frozen", "casd_lora"):
+    if mode == "casd":
         return model.output_head
     return model.decoder
 
