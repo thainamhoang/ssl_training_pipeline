@@ -1,0 +1,46 @@
+global_vars:
+  lr_deg: 5.625
+  hr_deg: 1.40625
+  var: 2m_temperature
+  seed: 3407
+
+data:
+  type: era5
+  lr_dir: /workspace/data/${global_vars.lr_deg}deg/${global_vars.var}
+  hr_dir: /workspace/data/${global_vars.hr_deg}deg/${global_vars.var}
+  stride: 6
+  batch_size: 128
+  num_workers: 6
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+model:
+  mode: fgd
+  model_id: dinov3-sat
+  upscale: 4
+  hidden_dim: 256
+  encoder_mode: lora
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  use_multiscale: true
+  tap_layers: [4, 7, 14, 24]
+  use_film: true
+  film_hidden: 128
+
+training:
+  max_epochs: 80
+  lr: 5e-5
+  decoder_lr: 2e-4
+  weight_decay: 1e-2
+  patience: 10
+  warmup_epochs: 5
+  grad_accum_steps: 1
+  spectral_lambda: 0.0
+  ckpt_dir: /workspace/checkpoints/${data.type}/${model.model_id}_${model.mode}_${model.encoder_mode}
+
+wandb:
+  entity: thainamhoang
+  project: ERA5 SSL
+  name: fgd_AB_${model.encoder_mode}_${model.model_id}_${model.upscale}x
