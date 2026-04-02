@@ -234,10 +234,7 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
             film_hidden=m.get("film_hidden", 128),
         )
 
-    raise ValueError(
-        f"Unknown mode '{mode}'. "
-        "Expected: frozen | lora | casd_frozen | casd_lora | fgd_frozen | fgd_lora"
-    )
+    raise ValueError(f"Unknown mode '{mode}'. Expected: frozen | lora | casd | fgd")
 
 
 def _watched_module(model, mode):
@@ -369,7 +366,6 @@ def main():
         val_metrics = evaluate(
             model,
             val_loader,
-            hr_shape,
             bilinear_rmse=val_bilinear_rmse,
             split="val",
         )
@@ -427,7 +423,6 @@ def main():
     test_metrics = evaluate(
         model,
         test_loader,
-        hr_shape,
         bilinear_rmse=test_bilinear_rmse,
         split="test",
     )
