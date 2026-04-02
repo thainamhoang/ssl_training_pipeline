@@ -640,7 +640,6 @@ def evaluate(
         f"{split}/rmse": rmse,
         f"{split}/pearson": total_pearson / n_batches,
         f"{split}/bias": total_bias / n_batches,
-        f"{split}/bilinear_rmse": bilinear_rmse,
         f"{split}/rmse_vs_bilinear": rmse - bilinear_rmse,
     }
 

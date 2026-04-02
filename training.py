@@ -426,25 +426,17 @@ def main():
         bilinear_rmse=test_bilinear_rmse,
         split="test",
     )
-    improvement = (
-        (test_metrics["test/bilinear_rmse"] - test_metrics["test/rmse"])
-        / test_metrics["test/bilinear_rmse"]
-        * 100
-    )
 
     run.log(
-        {k: float(v) for k, v in test_metrics.items()}
-        | {"test/improvement_pct": float(improvement)},
+        {k: float(v) for k, v in test_metrics.items()},
         commit=True,
     )
     run.summary["test/rmse"] = float(test_metrics["test/rmse"])
     run.summary["test/pearson"] = float(test_metrics["test/pearson"])
-    run.summary["test/improvement_pct"] = float(improvement)
 
     print(f"\n── Test Results ({model_key} / {mode}) ──────────────────────")
     for k, v in test_metrics.items():
         print(f"  {k:<30}: {v:.4f}")
-    print(f"  {'test/improvement_pct':<30}: {improvement:.1f}%")
 
     run.finish()
 
