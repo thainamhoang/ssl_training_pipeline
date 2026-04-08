@@ -41,7 +41,7 @@ training:
   warmup_epochs: 5
   grad_accum_steps: 1
   spectral_lambda: 0.1
-  ckpt_dir: /workspace/checkpoints/${data.type}/${model.model_id}_${model.mode}_A_${model.encoder_mode}
+  ckpt_dir: /workspace/checkpoints/${data.type}/${model.model_id}_${model.mode}_AD_${model.encoder_mode}
 
 wandb:
   entity: thainamhoang
