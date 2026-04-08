@@ -20,6 +20,7 @@ Expected config fields:
                  tap_layers, proj_dim, n_heads,          # CASD
                  n_ca_layers, ca_dropout, use_static,   # CASD
                  use_multiscale, use_film, film_hidden,  # FGD
+                 use_cls, cls_hidden, cls_layer_idx,     # FGD
     data:        lr_dir, hr_dir, stride, batch_size,
                  num_workers, pin_memory, persistent_workers, prefetch_factor
     training:    lr, decoder_lr, weight_decay,
@@ -224,9 +225,12 @@ def _build_model(mode, model_id, patch_size, lr_shape, hr_shape, cfg):
             mode=m.encoder_mode,
             **lora_kwargs,
             use_multiscale=m.get("use_multiscale", True),
-            tap_layers=list(m.get("tap_layers", [4, 7, 14, 24])),
+            tap_layers=list(m.get("tap_layers", [4, 7, 14])),
             use_film=m.get("use_film", False),
             film_hidden=m.get("film_hidden", 128),
+            use_cls=m.get("use_cls", False),
+            cls_hidden=m.get("cls_hidden", 128),
+            cls_layer_idx=m.get("cls_layer_idx", -1),
         )
 
     raise ValueError(f"Unknown mode '{mode}'. Expected: frozen | lora | casd | fgd")
@@ -375,23 +379,12 @@ def main():
         )
         scheduler.step()
 
-        current_lr = float(scheduler.get_last_lr()[0])
-        log_dict = {
-            "epoch": epoch,
-            "lr": current_lr,
-            **{k: float(v) for k, v in train_metrics.items()},
-            **{k: float(v) for k, v in val_metrics.items()},
-        }
-        run.log(log_dict, step=epoch, commit=True)
-
-        print(
-            f"Epoch {epoch:3d}/{cfg.training.max_epochs} |  "
-            f"LR: {current_lr:.2e} |  "
-            f"Loss: {train_metrics['train/loss']:.4f} |  "
-            f"Val RMSE: {val_metrics['val/rmse']:.4f} |  "
-            f"Pearson: {val_metrics['val/pearson']:.4f} |  "
-            f"vs Bilinear: {val_metrics['val/rmse_vs_bilinear']:+.4f}"
-        )
+        is_new_best = val_metrics["val/rmse"] < best_val_rmse
+        if is_new_best:
+            best_val_rmse = val_metrics["val/rmse"]
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
         ckpt_kwargs = dict(
             epoch=epoch,
@@ -407,14 +400,29 @@ def main():
 
         save_checkpoint(CKPT_LATEST, best_val_rmse=best_val_rmse, **ckpt_kwargs)
 
-        if val_metrics["val/rmse"] < best_val_rmse:
-            best_val_rmse = val_metrics["val/rmse"]
-            epochs_no_improve = 0
+        current_lr = float(scheduler.get_last_lr()[0])
+        log_dict = {
+            "epoch": epoch,
+            "lr": current_lr,
+            **{k: float(v) for k, v in train_metrics.items()},
+            **{k: float(v) for k, v in val_metrics.items()},
+            "best/val_rmse": float(best_val_rmse),
+        }
+        run.log(log_dict, step=epoch, commit=True)
+
+        print(
+            f"Epoch {epoch:3d}/{cfg.training.max_epochs} |  "
+            f"LR: {current_lr:.2e} |  "
+            f"Loss: {train_metrics['train/loss']:.4f} |  "
+            f"Val RMSE: {val_metrics['val/rmse']:.4f} |  "
+            f"Pearson: {val_metrics['val/pearson']:.4f} |  "
+            f"vs Bilinear: {val_metrics['val/rmse_vs_bilinear']:+.4f}"
+        )
+
+        if is_new_best:
             save_checkpoint(CKPT_BEST, best_val_rmse=best_val_rmse, **ckpt_kwargs)
-            run.log({"best/val_rmse": float(best_val_rmse)}, step=epoch, commit=False)
             print(f"  → New best: {best_val_rmse:.4f} (saved to {CKPT_BEST})")
         else:
-            epochs_no_improve += 1
             if epochs_no_improve >= cfg.training.patience:
                 print(f"  → Early stopping at epoch {epoch}")
                 break

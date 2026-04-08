@@ -456,6 +456,8 @@ def load_checkpoint(
         "use_static",
         "use_multiscale",
         "use_film",
+        "use_cls",
+        "cls_layer_idx",
     ):
         if attr in saved_model_cfg and hasattr(model, attr):
             _warn_mismatch(attr, saved_model_cfg[attr], getattr(model, attr))
