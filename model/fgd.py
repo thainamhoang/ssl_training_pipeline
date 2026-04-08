@@ -357,6 +357,7 @@ class MultiScaleProjection(nn.Module):
         """
         n_patches = self.n_patches_h * self.n_patches_w
         spatial_list = []
+        fused = None
 
         for proj, layer_idx in zip(self.projs, self.tap_layers):
             hs = hidden_states[layer_idx]  # [B, 517, 1024]
@@ -367,15 +368,13 @@ class MultiScaleProjection(nn.Module):
             spatial = projected.reshape(
                 B, self.n_patches_h, self.n_patches_w, D
             ).permute(0, 3, 1, 2)  # [B, hidden_dim, H_p, W_p]
-            spatial_list.append(spatial)
+            if return_list:
+                spatial_list.append(spatial)
+            else:
+                fused = spatial if fused is None else fused + spatial
 
         if return_list:
             return spatial_list
-
-        # Sum all layers — used when use_film=False (Addition A only)
-        fused = spatial_list[0]
-        for s in spatial_list[1:]:
-            fused = fused + s
         return fused  # [B, hidden_dim, H_p, W_p]
 
 

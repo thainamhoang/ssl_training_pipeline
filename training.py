@@ -40,11 +40,8 @@ from omegaconf import OmegaConf
 import wandb
 from dotenv import load_dotenv
 
-from dataset.downscaling_dataset import DownscalingDataset
-from model.frozen_ssl import FrozenSSLDownscaler
-from model.ssl_downscaler import SSLDownscaler
-from model.casd import CASD
-from model.fgd import FGD, fgd_loss
+from dataset import DownscalingDataset, BilinearBaselineView
+from model import FrozenSSLDownscaler, SSLDownscaler, CASD, FGD
 from trainer_utils import (
     make_optimizer,
     make_scheduler,
@@ -103,8 +100,6 @@ CKPT_DIR = cfg.training.get("ckpt_dir", "./checkpoints")
 os.makedirs(CKPT_DIR, exist_ok=True)
 CKPT_LATEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_latest.pt")
 CKPT_BEST = os.path.join(CKPT_DIR, f"{cfg.model.upscale}x_g2g_best.pt")
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def load_static_vars(hr_dir: str, hr_shape: tuple):
@@ -273,6 +268,8 @@ def main():
 
     lr_shape = train_ds.lr_shape
     hr_shape = train_ds.hr_shape
+    val_baseline_ds = BilinearBaselineView(val_ds)
+    test_baseline_ds = BilinearBaselineView(test_ds)
 
     pw = cfg.data.persistent_workers if cfg.data.num_workers > 0 else False
     pf = cfg.data.prefetch_factor if cfg.data.num_workers > 0 else None
@@ -293,11 +290,13 @@ def main():
     train_loader = make_loader(train_ds, shuffle=True)
     val_loader = make_loader(val_ds, shuffle=False)
     test_loader = make_loader(test_ds, shuffle=False)
+    val_baseline_loader = make_loader(val_baseline_ds, shuffle=False)
+    test_baseline_loader = make_loader(test_baseline_ds, shuffle=False)
 
     # ── Bilinear baselines (computed once, never changes) ─────────────────────
     print("Computing bilinear baselines...")
-    val_bilinear_rmse = compute_bilinear_rmse(val_loader, hr_shape)
-    test_bilinear_rmse = compute_bilinear_rmse(test_loader, hr_shape)
+    val_bilinear_rmse = compute_bilinear_rmse(val_baseline_loader, hr_shape)
+    test_bilinear_rmse = compute_bilinear_rmse(test_baseline_loader, hr_shape)
     print(f"  Val  bilinear RMSE : {val_bilinear_rmse:.4f}")
     print(f"  Test bilinear RMSE : {test_bilinear_rmse:.4f}")
 
@@ -350,7 +349,12 @@ def main():
     )
     wandb_run_id = run.id
     print(f"WandB run: {run.url}")
-    run.watch(_watched_module(model, mode), log="all", log_freq=50)
+    if cfg.wandb.get("watch", False):
+        run.watch(
+            _watched_module(model, mode),
+            log=cfg.wandb.get("watch_log", "gradients"),
+            log_freq=cfg.wandb.get("watch_log_freq", 200),
+        )
 
     # ── Training loop ──────────────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg.training.max_epochs + 1):

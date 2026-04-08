@@ -657,7 +657,11 @@ def compute_bilinear_rmse(loader, hr_shape: tuple) -> float:
     """
     sum_sq = 0.0
     n_pixels = 0
-    for _, lr_norm, hr_norm in tqdm(loader, desc="Bilinear baseline", leave=False):
+    for batch in tqdm(loader, desc="Bilinear baseline", leave=False):
+        if len(batch) == 3:
+            _, lr_norm, hr_norm = batch
+        else:
+            lr_norm, hr_norm = batch
         lr_norm = lr_norm.to(DEVICE, non_blocking=True)
         hr_norm = hr_norm.to(DEVICE, non_blocking=True).float()
         bil = F.interpolate(

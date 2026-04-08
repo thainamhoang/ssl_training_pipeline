@@ -368,8 +368,9 @@ class CASD(nn.Module):
         ]
         token_pool = torch.cat(projected, dim=1)  # [B, n_tap*N, proj_dim]
 
-        coords = self.coord_grid.unsqueeze(0).expand(B, -1, -1)
-        queries = self.coord_proj(coords)  # [B, H*W, proj_dim]
+        queries = self.coord_proj(self.coord_grid).unsqueeze(0).expand(B, -1, -1)
+        # Coordinate queries are identical for every sample in the batch, so
+        # project once and broadcast instead of re-running the MLP B times.
 
         for ca_block in self.ca_blocks:
             queries = ca_block(queries, token_pool)
