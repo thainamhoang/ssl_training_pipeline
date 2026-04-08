@@ -32,6 +32,7 @@ class DownscalingDataset(Dataset):
 
     IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
     IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    EPS = 1e-8
 
     def __init__(
         self,
@@ -68,6 +69,8 @@ class DownscalingDataset(Dataset):
         self.hr_std = torch.tensor(
             hr_std_f["2m_temperature"], dtype=torch.float32
         ).view(1, 1, 1)
+        self.lr_inv_std = 1.0 / (self.lr_std + self.EPS)
+        self.hr_inv_std = 1.0 / (self.hr_std + self.EPS)
 
         # ── Shard paths ───────────────────────────────────────────────────
         lr_shards = sorted(glob.glob(os.path.join(lr_dir, partition, "*.npz")))
@@ -173,17 +176,16 @@ class DownscalingDataset(Dataset):
     def __getitem__(self, idx: int):
         lr_np, hr_np = self._get_raw(idx)
 
-        lr_raw = torch.tensor(lr_np, dtype=torch.float32)  # [1, H_lr, W_lr]
-        hr_raw = torch.tensor(hr_np, dtype=torch.float32)  # [1, H_hr, W_hr]
+        lr_raw = torch.from_numpy(lr_np).to(dtype=torch.float32)  # [1, H_lr, W_lr]
+        hr_raw = torch.from_numpy(hr_np).to(dtype=torch.float32)  # [1, H_hr, W_hr]
 
         # ── Z-score normalize ─────────────────────────────────────────────
-        lr_norm = (lr_raw - self.lr_mean) / (self.lr_std + 1e-8)
-        hr_norm = (hr_raw - self.hr_mean) / (self.hr_std + 1e-8)
+        lr_norm = (lr_raw - self.lr_mean) * self.lr_inv_std
+        hr_norm = (hr_raw - self.hr_mean) * self.hr_inv_std
 
         # ── SSL encoder input: z-score → [0,1] → ImageNet ─────────────────
-        lr_z = (lr_raw - self.lr_mean) / (self.lr_std + 1e-8)
-        lr_01 = torch.clamp(lr_z / 6.0 + 0.5, 0.0, 1.0)  # [-3σ,+3σ] → [0,1]
-        lr_imagenet = lr_01.repeat(3, 1, 1)
+        lr_01 = torch.clamp(lr_norm / 6.0 + 0.5, 0.0, 1.0)  # [-3σ,+3σ] → [0,1]
+        lr_imagenet = lr_01.expand(3, -1, -1)
         lr_imagenet = (lr_imagenet - self.IMAGENET_MEAN) / self.IMAGENET_STD
 
         return lr_imagenet, lr_norm, hr_norm

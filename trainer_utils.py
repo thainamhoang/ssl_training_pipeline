@@ -546,14 +546,15 @@ def train_one_epoch(
     total_loss = 0.0
     sum_sq_err = 0.0
     n_samples = 0
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
     for i, (lr_imagenet, _, hr_norm) in enumerate(
         tqdm(loader, desc=f"Train {epoch}", leave=False)
     ):
-        lr_imagenet = lr_imagenet.to(DEVICE)
-        hr_norm = hr_norm.to(DEVICE)
+        lr_imagenet = lr_imagenet.to(DEVICE, non_blocking=True)
+        hr_norm = hr_norm.to(DEVICE, non_blocking=True)
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             pred = model(lr_imagenet)
@@ -562,20 +563,20 @@ def train_one_epoch(
         scaler.scale(loss).backward()
 
         real_loss = loss.item() * grad_accum_steps
-        sum_sq_err += real_loss * hr_norm.numel()
+        batch_sq_err = F.mse_loss(
+            pred.detach().float(), hr_norm.float(), reduction="sum"
+        )
+        sum_sq_err += batch_sq_err.item()
         n_samples += hr_norm.numel()
         total_loss += real_loss
 
         is_last_batch = i + 1 == len(loader)
         if (i + 1) % grad_accum_steps == 0 or is_last_batch:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                max_norm=1.0,
-            )
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
     n_steps = len(loader)
     return {
@@ -601,10 +602,11 @@ def evaluate(
     total_bias = 0.0
     n_batches = 0
     n_pixels = 0
+    film = getattr(model, "film", None)
 
     for lr_imagenet, _, hr_norm in tqdm(loader, desc=f"Eval {split}", leave=False):
-        lr_imagenet = lr_imagenet.to(DEVICE)
-        hr_norm = hr_norm.to(DEVICE)
+        lr_imagenet = lr_imagenet.to(DEVICE, non_blocking=True)
+        hr_norm = hr_norm.to(DEVICE, non_blocking=True)
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             pred = model(lr_imagenet).float()
@@ -616,17 +618,16 @@ def evaluate(
         total_bias += (pred - hr_norm).mean().item()
         n_pixels += hr_norm.numel()
 
-        batch_pearson = 0.0
-        for i in range(B):
-            p = pred[i].flatten()
-            t = hr_norm[i].flatten()
-            pc = p - p.mean()
-            tc = t - t.mean()
-            r = (pc * tc).sum() / (
-                torch.sqrt((pc**2).sum()) * torch.sqrt((tc**2).sum()) + 1e-8
-            )
-            batch_pearson += r.item()
-        total_pearson += batch_pearson / B
+        pred_flat = pred.view(B, -1)
+        target_flat = hr_norm.view(B, -1)
+        pred_centered = pred_flat - pred_flat.mean(dim=1, keepdim=True)
+        target_centered = target_flat - target_flat.mean(dim=1, keepdim=True)
+        numer = (pred_centered * target_centered).sum(dim=1)
+        denom = torch.sqrt((pred_centered**2).sum(dim=1)) * torch.sqrt(
+            (target_centered**2).sum(dim=1)
+        )
+        batch_pearson = numer / (denom + 1e-8)
+        total_pearson += batch_pearson.mean().item()
 
         n_batches += 1
 
@@ -635,8 +636,9 @@ def evaluate(
 
     rmse = (sum_sq_err / n_pixels) ** 0.5
 
-    print("FiLM gamma range:", model.film.mlp[-1].weight.abs().max().item())
-    print("FiLM beta range:", model.film.mlp[-1].bias.abs().max().item())
+    if film is not None:
+        print("FiLM gamma range:", film.mlp[-1].weight.abs().max().item())
+        print("FiLM beta range:", film.mlp[-1].bias.abs().max().item())
 
     return {
         f"{split}/loss": sum_sq_err / n_pixels,
@@ -656,8 +658,8 @@ def compute_bilinear_rmse(loader, hr_shape: tuple) -> float:
     sum_sq = 0.0
     n_pixels = 0
     for _, lr_norm, hr_norm in tqdm(loader, desc="Bilinear baseline", leave=False):
-        lr_norm = lr_norm.to(DEVICE)
-        hr_norm = hr_norm.to(DEVICE).float()
+        lr_norm = lr_norm.to(DEVICE, non_blocking=True)
+        hr_norm = hr_norm.to(DEVICE, non_blocking=True).float()
         bil = F.interpolate(
             lr_norm, size=hr_shape, mode="bilinear", align_corners=False
         )
