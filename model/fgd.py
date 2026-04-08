@@ -1,32 +1,69 @@
 """
 fgd.py
 
-FGD — Frequency-Geographic Decoder. Pilot 5.
+FGD — Frequency-Geographic Decoder
 
-Extends SSLDownscaler (LoRA encoder + pixel-shuffle decoder) with three
-independently ablatable additions:
+Pilot 5 architecture. Extends SSLDownscaler with three additions on top of
+the existing LoRA r=8 encoder, each independently ablatable:
 
-    A — Multi-scale token fusion (use_multiscale=True)
-        Taps encoder hidden states at layers [4, 7, 14, 24].
-        Each layer projected to hidden_dim and summed → same decoder shape.
+    A — Multi-scale token fusion
+        Taps encoder hidden states at layers [4, 7, 14, 24] instead of only
+        layer 24. Projects each to hidden_dim and concatenates into a single
+        spatial feature map before pixel-shuffle. Motivated by probe results
+        showing T2m correlation r>0.88 across layers 1-20.
 
-    B — FiLM geographic conditioning (use_film=True, requires A)
-        Per-location scale γ and shift β from sin/cos lat/lon.
-        Applied at patch resolution before pixel-shuffle.
+    B — Layer-wise FiLM geographic conditioning
+        Feature-wise Linear Modulation applied independently to each tap layer
+        before summation. Each layer gets its own γ_l(coord) and β_l(coord),
+        allowing location-dependent layer selection:
+            F = Σ_l FiLM_l(proj_l(h_l), coord)
+        vs post-summation FiLM which can only modulate the collapsed sum.
+        Parameters: ~270K (n_tap × 2 × hidden_dim × coord_hidden).
 
-    C — Spectral loss (spectral_lambda > 0, passed to fgd_loss())
-        Frequency-weighted L1 on 2D FFT of prediction vs target.
-        High frequencies penalised more to counter SSL low-pass bias.
+    C — Spectral loss
+        Frequency-weighted L1 loss on 2D FFT of prediction vs target.
+        High-frequency components weighted by radial distance from DC.
+        Counters SSL encoder's natural low-pass bias (motivated by probe
+        showing SSL features degrade at layers 22-23).
 
-Ablation modes:
-    use_multiscale=False, use_film=False → identical to SSLDownscaler
-    use_multiscale=True,  use_film=False → addition A only
-    use_multiscale=True,  use_film=True  → additions A + B
-    spectral_lambda > 0                  → addition C (any mode)
+Ablation modes (set via config):
+    use_multiscale = False, use_film = False  → identical to SSLDownscaler
+    use_multiscale = True,  use_film = False  → addition A only
+    use_multiscale = True,  use_film = True   → additions A + B
+    spectral_lambda > 0                       → addition C (loss term, any mode)
 
-Training integration:
-    In training.py, pass to train_one_epoch:
-        loss_fn=functools.partial(fgd_loss, spectral_lambda=cfg.training.spectral_lambda)
+VRAM: identical to LoRA r=8 SSLDownscaler — no cross-attention, no new
+large tensors. Multi-scale taps 4 layers instead of 1 but hidden_states
+are already computed; the only overhead is 3 extra projection layers (~3M).
+
+Usage:
+    # Addition A only
+    model = FGD(
+        model_id       = "facebook/dinov3-vitl16-pretrain-sat493m",
+        patch_size     = 16,
+        lr_shape       = (32, 64),
+        hr_shape       = (128, 256),
+        mode           = "lora",
+        lora_r         = 8,
+        use_multiscale = True,
+        use_film       = False,
+    )
+
+    # Additions A + B (layer-wise FiLM — location-dependent layer selection)
+    model = FGD(..., use_multiscale=True, use_film=True)
+
+    # Full FGD (A + B + C): pass spectral_lambda to the loss function
+    loss = fgd_loss(pred, hr_norm, spectral_lambda=0.1)
+
+Training script integration:
+    In trainer_utils.py train_one_epoch, replace:
+        loss = F.mse_loss(pred, hr_norm) / grad_accum_steps
+    With:
+        loss = fgd_loss(pred, hr_norm,
+                        spectral_lambda=cfg.training.get("spectral_lambda", 0.0)
+                       ) / grad_accum_steps
+
+    In training.py, add "fgd" mode to the model construction block.
 """
 
 import math
@@ -79,6 +116,120 @@ def fgd_loss(
 
     spectral = (freq_weight * (pred_fft - target_fft).abs()).mean()
     return mse + spectral_lambda * spectral
+
+
+# ── Layer-wise FiLM geographic conditioning (Addition B) ──────────────────
+
+
+class LayerWiseFiLM(nn.Module):
+    """
+    Layer-wise Feature-wise Linear Modulation conditioned on geographic coords.
+
+    The key architectural difference from post-summation FiLM:
+        OLD: F = FiLM(Σ_l proj_l(h_l), coord)      ← modulates collapsed sum
+        NEW: F = Σ_l FiLM_l(proj_l(h_l), coord)    ← modulates each layer
+
+    This allows location-dependent layer selection — a mountain pixel can
+    learn to upweight layer 4 (high spatial coherence, r=0.895) while an
+    ocean pixel upweights layer 14 (distributed features, lower noise).
+
+    One MLP outputs γ and β for all tap layers simultaneously:
+        output dim = 2 * n_tap * hidden_dim
+        split into n_tap pairs of (γ_l, β_l), each [B, hidden_dim, H_p, W_p]
+
+    Zero-init on final MLP layer → all FiLM ops are identity at epoch 0,
+    so adding layer-wise FiLM doesn't change initial RMSE.
+
+    Parameters
+    ----------
+    hidden_dim  : feature channels per layer (must match MultiScaleProjection)
+    n_tap       : number of tap layers
+    n_patches_h : patch grid height (default 16)
+    n_patches_w : patch grid width  (default 32)
+    coord_hidden: MLP hidden size (default 128)
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        n_tap: int,
+        n_patches_h: int = 16,
+        n_patches_w: int = 32,
+        coord_hidden: int = 128,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.n_tap = n_tap
+        self.n_patches_h = n_patches_h
+        self.n_patches_w = n_patches_w
+
+        # Build coordinate grid at patch resolution — same as before
+        lats = torch.linspace(90.0, -90.0, n_patches_h)
+        lons = torch.linspace(0.0, 358.59375, n_patches_w)
+        lat_rad = lats * (math.pi / 180.0)
+        lon_rad = lons * (math.pi / 180.0)
+        lat_grid, lon_grid = torch.meshgrid(lat_rad, lon_rad, indexing="ij")
+        coords = torch.stack(
+            [
+                lat_grid.sin(),
+                lat_grid.cos(),
+                lon_grid.sin(),
+                lon_grid.cos(),
+            ],
+            dim=-1,
+        )  # [H_p, W_p, 4]
+        self.register_buffer("coord_grid", coords)
+
+        # Single MLP outputs γ and β for ALL tap layers at once
+        # Output: 2 * n_tap * hidden_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(4, coord_hidden),
+            nn.GELU(),
+            nn.Linear(coord_hidden, 2 * n_tap * hidden_dim),
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.mlp[0].weight)
+        nn.init.zeros_(self.mlp[0].bias)
+        # Zero-init final layer → identity at epoch 0
+        nn.init.zeros_(self.mlp[2].weight)
+        nn.init.zeros_(self.mlp[2].bias)
+
+    def forward(self, spatial_list: list) -> torch.Tensor:
+        """
+        Apply per-layer FiLM modulation then sum.
+
+        Args:
+            spatial_list : list of n_tap tensors, each [B, hidden_dim, H_p, W_p]
+                           (projected spatial maps from MultiScaleProjection)
+
+        Returns:
+            fused : [B, hidden_dim, H_p, W_p]
+        """
+        B = spatial_list[0].shape[0]
+
+        # [H_p, W_p, 2*n_tap*D] → [2*n_tap*D, H_p, W_p] → [B, 2*n_tap*D, H_p, W_p]
+        all_params = self.mlp(self.coord_grid)  # [H_p, W_p, 2*n_tap*D]
+        all_params = all_params.permute(2, 0, 1)  # [2*n_tap*D, H_p, W_p]
+        all_params = all_params.unsqueeze(0).expand(B, -1, -1, -1)
+        # [B, 2*n_tap*D, H_p, W_p]
+
+        # Split into per-layer γ and β
+        # all_params = [γ_0, γ_1, ..., γ_{n-1}, β_0, β_1, ..., β_{n-1}]
+        gammas_all, betas_all = all_params.chunk(2, dim=1)
+        # Each: [B, n_tap*hidden_dim, H_p, W_p]
+
+        gammas = gammas_all.chunk(self.n_tap, dim=1)  # n_tap × [B, D, H_p, W_p]
+        betas = betas_all.chunk(self.n_tap, dim=1)
+
+        # Apply per-layer FiLM and sum
+        fused = None
+        for feat, gamma, beta in zip(spatial_list, gammas, betas):
+            modulated = (1.0 + gamma) * feat + beta  # [B, D, H_p, W_p]
+            fused = modulated if fused is None else fused + modulated
+
+        return fused  # [B, hidden_dim, H_p, W_p]
 
 
 # ── FiLM geographic conditioning (Addition B) ─────────────────────────────────
@@ -140,17 +291,32 @@ class FiLMConditioner(nn.Module):
         return (1.0 + gamma) * feat + beta
 
 
-# ── Multi-scale token fusion (Addition A) ─────────────────────────────────────
+# ── Multi-scale token projections (Addition A) ────────────────────────────
 
 
 class MultiScaleProjection(nn.Module):
     """
-    Projects and sums tokens from multiple encoder layers into one
-    spatial feature map [B, hidden_dim, H_p, W_p].
+    Projects and fuses tokens from multiple encoder layers into one
+    spatial feature map of shape [B, hidden_dim, H_p, W_p].
 
-    Summation (not concatenation) keeps output channels = hidden_dim so
-    the pixel-shuffle decoder input shape is unchanged vs the baseline.
-    Each tap layer gets its own Linear + LayerNorm projection.
+    Each tap layer gets its own independent Linear projection (1024 → proj_dim).
+    The projections are then summed (not concatenated) to keep the output
+    channel count at hidden_dim regardless of how many layers are tapped.
+
+    Summation rather than concatenation:
+        - Keeps output channels = hidden_dim = 256 (same as single-layer baseline)
+        - The pixel-shuffle decoder input shape is unchanged
+        - Total added params: n_tap × Linear(1024, proj_dim) ≈ 3M for 3 extra taps
+        - Concatenation would require changing the decoder's first Conv2d
+
+    Parameters
+    ----------
+    enc_dim    : encoder hidden dim (1024 for DINOv3-SAT ViT-L)
+    hidden_dim : output channel count = decoder input channels
+    tap_layers : which hidden state layers to tap (e.g. [4, 7, 14, 24])
+                 layer 24 = last_hidden_state (Pilot 2/3 baseline)
+    n_patches_h: patch grid height
+    n_patches_w: patch grid width
     """
 
     def __init__(
@@ -165,28 +331,52 @@ class MultiScaleProjection(nn.Module):
         self.tap_layers = tap_layers
         self.n_patches_h = n_patches_h
         self.n_patches_w = n_patches_w
-        self.n_patches = n_patches_h * n_patches_w
 
+        # One projection + LayerNorm per tap layer
         self.projs = nn.ModuleList(
             [
-                nn.Sequential(nn.Linear(enc_dim, hidden_dim), nn.LayerNorm(hidden_dim))
+                nn.Sequential(
+                    nn.Linear(enc_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                )
                 for _ in tap_layers
             ]
         )
 
-    def forward(self, hidden_states: tuple) -> torch.Tensor:
-        fused = None
+    def forward(self, hidden_states: tuple, return_list: bool = False):
+        """
+        Args:
+            hidden_states : tuple of 25 tensors, each [B, 517, 1024]
+                            (output of encoder with output_hidden_states=True)
+            return_list   : if True, return list of per-layer spatial maps
+                            (used by LayerWiseFiLM). If False, return summed map.
+
+        Returns:
+            if return_list=False : [B, hidden_dim, H_p, W_p]  summed feature map
+            if return_list=True  : list of n_tap [B, hidden_dim, H_p, W_p] tensors
+        """
+        n_patches = self.n_patches_h * self.n_patches_w
+        spatial_list = []
+
         for proj, layer_idx in zip(self.projs, self.tap_layers):
-            tokens = hidden_states[layer_idx][:, 1 : 1 + self.n_patches, :].float()
-            projected = proj(tokens)  # [B, N, hidden_dim]
+            hs = hidden_states[layer_idx]  # [B, 517, 1024]
+            tokens = hs[:, 1 : 1 + n_patches, :].float()  # [B, 512, 1024]
+            projected = proj(tokens)  # [B, 512, hidden_dim]
 
             B, N, D = projected.shape
-            spatial = projected.reshape(B, self.n_patches_h, self.n_patches_w, D)
-            spatial = spatial.permute(0, 3, 1, 2)  # [B, hidden_dim, H_p, W_p]
+            spatial = projected.reshape(
+                B, self.n_patches_h, self.n_patches_w, D
+            ).permute(0, 3, 1, 2)  # [B, hidden_dim, H_p, W_p]
+            spatial_list.append(spatial)
 
-            fused = spatial if fused is None else fused + spatial
+        if return_list:
+            return spatial_list
 
-        return fused
+        # Sum all layers — used when use_film=False (Addition A only)
+        fused = spatial_list[0]
+        for s in spatial_list[1:]:
+            fused = fused + s
+        return fused  # [B, hidden_dim, H_p, W_p]
 
 
 # ── Main model ────────────────────────────────────────────────────────────────
@@ -195,6 +385,17 @@ class MultiScaleProjection(nn.Module):
 class FGD(nn.Module):
     """
     Frequency-Geographic Decoder.
+
+    Extends SSLDownscaler (LoRA r=8, pixel-shuffle) with three ablatable additions:
+        A — multi-scale token fusion      (use_multiscale=True)
+        B — layer-wise FiLM conditioning  (use_film=True, requires A)
+        C — spectral loss                 (spectral_lambda > 0, passed to fgd_loss)
+
+    Addition B uses LayerWiseFiLM, not post-summation FiLM:
+        OLD (post-sum):   F = FiLM(Σ_l proj_l(h_l), coord)
+        NEW (layer-wise): F = Σ_l FiLM_l(proj_l(h_l), coord)
+    This allows location-dependent layer selection — each location learns
+    which encoder layers to upweight based on its geographic context.
 
     Parameters
     ----------
@@ -206,11 +407,11 @@ class FGD(nn.Module):
     hidden_dim     : decoder hidden channels (default 256)
     mode           : "frozen" | "lora"
     lora_r         : LoRA rank (default 8)
-    lora_alpha     : LoRA alpha (defaults to lora_r)
+    lora_alpha     : LoRA alpha (defaults to 2*lora_r)
     lora_dropout   : LoRA dropout (default 0.0)
     use_multiscale : enable multi-scale token fusion — Addition A
     tap_layers     : layers to tap when use_multiscale=True (default [4,7,14,24])
-    use_film       : enable FiLM geographic conditioning — Addition B
+    use_film       : enable layer-wise FiLM conditioning — Addition B
                      requires use_multiscale=True
     film_hidden    : FiLM MLP hidden size (default 128)
     """
@@ -256,7 +457,7 @@ class FGD(nn.Module):
         )
 
         additions = (["A:multiscale"] if use_multiscale else []) + (
-            ["B:FiLM"] if use_film else []
+            ["B:layer-wise-FiLM"] if use_film else []
         )
         print(
             f"[FGD] mode={mode}, lora_r={lora_r}"
@@ -264,7 +465,8 @@ class FGD(nn.Module):
         )
         print(f"SSL input size : {self.ssl_size[0]}×{self.ssl_size[1]}")
         print(
-            f"Patch grid     : {self.n_patches_h}×{self.n_patches_w} = {self.n_patches} tokens"
+            f"Patch grid     : {self.n_patches_h}×{self.n_patches_w}"
+            f" = {self.n_patches} tokens"
         )
         if use_multiscale:
             print(f"Tap layers     : {self.tap_layers}")
@@ -277,18 +479,30 @@ class FGD(nn.Module):
         # ── Feature normalizer — single-layer path only ────────────────────
         self.feat_norm = nn.LayerNorm(enc_dim) if not use_multiscale else None
 
-        # ── Addition A: multi-scale projection ────────────────────────────
+        # ── Addition A: multi-scale projection ─────────────────────────────
         self.ms_proj = (
             MultiScaleProjection(
-                enc_dim, hidden_dim, self.tap_layers, self.n_patches_h, self.n_patches_w
+                enc_dim,
+                hidden_dim,
+                self.tap_layers,
+                self.n_patches_h,
+                self.n_patches_w,
             )
             if use_multiscale
             else None
         )
 
-        # ── Addition B: FiLM conditioning ─────────────────────────────────
+        # ── Addition B: layer-wise FiLM conditioning ───────────────────────
+        # LayerWiseFiLM applies independent γ_l / β_l per tap layer before
+        # summation, enabling location-dependent layer weighting.
         self.film = (
-            FiLMConditioner(hidden_dim, self.n_patches_h, self.n_patches_w, film_hidden)
+            LayerWiseFiLM(
+                hidden_dim=hidden_dim,
+                n_tap=len(self.tap_layers),
+                n_patches_h=self.n_patches_h,
+                n_patches_w=self.n_patches_w,
+                coord_hidden=film_hidden,
+            )
             if use_film
             else None
         )
@@ -344,10 +558,16 @@ class FGD(nn.Module):
         patch_tokens, hidden_states = self._encode(x)
 
         if self.use_multiscale:
-            feat = self.ms_proj(hidden_states)  # [B, hidden_dim, H_p, W_p]
             if self.use_film:
-                feat = self.film(feat)
+                # Addition A+B: get per-layer spatial maps, apply layer-wise
+                # FiLM per layer, sum inside LayerWiseFiLM
+                spatial_list = self.ms_proj(hidden_states, return_list=True)
+                feat = self.film(spatial_list)  # [B, hidden_dim, H_p, W_p]
+            else:
+                # Addition A only: project and sum
+                feat = self.ms_proj(hidden_states)  # [B, hidden_dim, H_p, W_p]
         else:
+            # Baseline: single final layer
             patch_tokens = self.feat_norm(patch_tokens)
             B, N, D = patch_tokens.shape
             feat = (

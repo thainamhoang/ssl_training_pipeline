@@ -25,7 +25,7 @@ model:
   lora_alpha: 16
   lora_dropout: 0.0
   use_multiscale: true
-  tap_layers: [4, 7, 14, 24]
+  tap_layers: [4, 7, 14]
   use_film: true
   film_hidden: 128
 
