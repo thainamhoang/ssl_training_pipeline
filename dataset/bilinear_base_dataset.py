@@ -1,6 +1,6 @@
 from torch.utils.data import Dataset
 import torch
-from downscaling_dataset import DownscalingDataset
+from .downscaling_dataset import DownscalingDataset
 
 
 class BilinearBaselineView(Dataset):

@@ -40,12 +40,8 @@ from omegaconf import OmegaConf
 import wandb
 from dotenv import load_dotenv
 
-from dataset.downscaling_dataset import DownscalingDataset
-from dataset.bilinear_base_dataset import BilinearBaselineView
-from model.frozen_ssl import FrozenSSLDownscaler
-from model.ssl_downscaler import SSLDownscaler
-from model.casd import CASD
-from model.fgd import FGD, fgd_loss
+from dataset import DownscalingDataset, BilinearBaselineView
+from model import FrozenSSLDownscaler, SSLDownscaler, CASD, FGD, fgd_loss
 from trainer_utils import (
     make_optimizer,
     make_scheduler,
